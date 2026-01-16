@@ -68,6 +68,9 @@ dataset/*
 # rust-analyzer
 Cargo.toml
 Cargo.lock
+!candle/**/Cargo.toml
+!candle/**/Cargo.lock
+
 target/
 
 # nfs files
