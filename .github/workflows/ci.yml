@@ -50,6 +50,8 @@ jobs:
       - name: Run clippy (macOS)
         if: matrix.os == 'macos-latest'
         run: cargo clippy --all-targets --features "quantized metal" -- -D warnings
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
 
   test:
     name: Test (${{ matrix.os }})
@@ -77,3 +79,5 @@ jobs:
       - name: Run tests (macOS)
         if: matrix.os == 'macos-latest'
         run: cargo test --release --all --features "quantized metal"
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
