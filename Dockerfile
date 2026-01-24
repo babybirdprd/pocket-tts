@@ -1,3 +1,11 @@
+# Stage 1: Build Web UI
+FROM oven/bun:1 AS frontend-builder
+WORKDIR /app
+COPY crates/pocket-tts-cli/web ./
+RUN bun install
+RUN bun run build
+
+# Stage 2: Build Rust
 # Multi-stage build for pocket-tts with pre-downloaded models
 FROM rust:1.92-bullseye AS builder
 
@@ -10,6 +18,10 @@ WORKDIR /build
 
 # Copy workspace files
 COPY ./ ./
+
+# Copy built frontend assets from previous stage
+# This ensures rust-embed finds the 'web/dist' folder
+COPY --from=frontend-builder /app/dist ./crates/pocket-tts-cli/web/dist
 
 # Build the project in release mode
 RUN cargo build --release
