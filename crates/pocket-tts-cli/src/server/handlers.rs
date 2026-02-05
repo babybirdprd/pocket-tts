@@ -237,17 +237,8 @@ pub async fn generate_stream(
                     Ok(chunk) => {
                         // Convert tensor to 16-bit PCM bytes
                         let chunk = chunk.squeeze(0).map_err(|e| anyhow::anyhow!(e))?;
-                        let data = chunk.to_vec2::<f32>().map_err(|e| anyhow::anyhow!(e))?;
-
-                        let mut bytes = Vec::new();
-                        for (i, _) in data[0].iter().enumerate() {
-                            for channel_data in &data {
-                                // Hard clamp to [-1, 1] to match Python's behavior
-                                let val = channel_data[i].clamp(-1.0, 1.0);
-                                let val = (val * 32767.0) as i16;
-                                bytes.extend_from_slice(&val.to_le_bytes());
-                            }
-                        }
+                        let bytes = pocket_tts::audio::pcm_i16_le_bytes(&chunk)
+                            .map_err(|e| anyhow::anyhow!(e))?;
 
                         if tx_inner.blocking_send(Ok(bytes)).is_err() {
                             break; // Receiver dropped

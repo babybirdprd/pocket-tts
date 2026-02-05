@@ -107,6 +107,44 @@ fn read_wav_internal<R: std::io::Read + std::io::Seek>(
     Ok((tensor, sample_rate))
 }
 
+pub fn pcm_i16_le_bytes(audio: &Tensor) -> anyhow::Result<Vec<u8>> {
+    let shape = audio.dims();
+    if shape.len() != 2 {
+        anyhow::bail!(
+            "Expected audio tensor with shape [channels, samples], got {:?}",
+            shape
+        );
+    }
+
+    let data = audio.to_vec2::<f32>()?;
+    let channel_slices: Vec<&[f32]> = data.iter().map(|channel| channel.as_slice()).collect();
+    Ok(pcm_i16_le_bytes_from_slices(&channel_slices))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn pcm_i16_le_bytes_mono(samples: &[f32]) -> Vec<u8> {
+    pcm_i16_le_bytes_from_slices(&[samples])
+}
+
+fn pcm_i16_le_bytes_from_slices(channels: &[&[f32]]) -> Vec<u8> {
+    if channels.is_empty() {
+        return Vec::new();
+    }
+
+    let num_samples = channels[0].len();
+    let mut out = Vec::with_capacity(num_samples * channels.len() * 2);
+
+    for i in 0..num_samples {
+        for channel in channels {
+            let val = channel[i].clamp(-1.0, 1.0);
+            let val = (val * 32767.0) as i16;
+            out.extend_from_slice(&val.to_le_bytes());
+        }
+    }
+
+    out
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_wav<P: AsRef<Path>>(path: P, audio: &Tensor, sample_rate: u32) -> anyhow::Result<()> {
     let mut writer = std::fs::File::create(path)?;
@@ -137,18 +175,10 @@ pub fn write_wav_to_writer<W: std::io::Write + std::io::Seek>(
     };
 
     let mut wav_writer = WavWriter::new(writer, spec)?;
-    let data = audio.to_vec2::<f32>()?;
-
-    // Interleave channels if more than 1
-    if !data.is_empty() {
-        for (i, _) in data[0].iter().enumerate() {
-            for channel_data in &data {
-                // Hard clamp to [-1, 1] to match Python's behavior
-                let val = channel_data[i].clamp(-1.0, 1.0);
-                let val = (val * 32767.0) as i16;
-                wav_writer.write_sample(val)?;
-            }
-        }
+    let pcm_bytes = pcm_i16_le_bytes(audio)?;
+    for chunk in pcm_bytes.chunks_exact(2) {
+        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+        wav_writer.write_sample(sample)?;
     }
     wav_writer.finalize()?;
     Ok(())
@@ -241,6 +271,22 @@ mod tests {
         let normalized = normalize_peak(&t)?;
         let data = normalized.to_vec2::<f32>()?;
         assert_eq!(data[0], vec![-1.0, 0.4, 1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pcm_i16_le_bytes_clamp_and_interleave() -> anyhow::Result<()> {
+        let device = Device::Cpu;
+        let data = vec![-1.0f32, 0.0, 1.0, 0.5, -0.5, 2.0];
+        let t = Tensor::from_vec(data, (2, 3), &device)?;
+
+        let bytes = pcm_i16_le_bytes(&t)?;
+        let samples: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+
+        assert_eq!(samples, vec![-32767, 16383, 0, -16383, 32767, 32767]);
         Ok(())
     }
 

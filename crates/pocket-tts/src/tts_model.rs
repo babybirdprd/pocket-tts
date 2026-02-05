@@ -3,15 +3,15 @@
 //! This is the high-level API for text-to-speech generation,
 //! matching Python's `pocket_tts/models/tts_model.py`.
 
+use crate::ModelState;
 use crate::conditioners::text::LUTConditioner;
-use crate::config::{defaults, load_config, Config};
+use crate::config::{Config, defaults, load_config};
 use crate::models::flow_lm::FlowLMModel;
 use crate::models::mimi::MimiModel;
 use crate::models::seanet::{SEANetDecoder, SEANetEncoder};
 use crate::models::transformer::{ProjectedTransformer, StreamingTransformer};
 use crate::modules::mlp::SimpleMLPAdaLN;
 use crate::voice_state::{increment_steps, init_states};
-use crate::ModelState;
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};

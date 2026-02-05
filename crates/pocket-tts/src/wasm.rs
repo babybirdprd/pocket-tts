@@ -160,11 +160,8 @@ impl WasmTTSModel {
             // Simple WAV header creation since hound is gated
             write_wav_header(&mut buffer, self.sample_rate, sample_vec.len() as u32)
                 .map_err(|e| JsValue::from_str(&format!("WAV header error: {:?}", e)))?;
-
-            for &sample in &sample_vec {
-                let s = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
-                buffer.get_mut().extend_from_slice(&s.to_le_bytes());
-            }
+            let pcm_bytes = crate::audio::pcm_i16_le_bytes_mono(&sample_vec);
+            buffer.get_mut().extend_from_slice(&pcm_bytes);
         }
 
         let base64 = base64_encode(buffer.get_ref());

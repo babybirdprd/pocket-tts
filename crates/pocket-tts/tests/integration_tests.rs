@@ -3,10 +3,10 @@
 //! These tests require the HF_TOKEN environment variable to be set
 //! for downloading model weights from HuggingFace.
 
+use pocket_tts::TTSModel;
 use pocket_tts::audio::{read_wav, write_wav};
 use pocket_tts::voice_state::init_states;
 use pocket_tts::weights::download_if_necessary;
-use pocket_tts::TTSModel;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;

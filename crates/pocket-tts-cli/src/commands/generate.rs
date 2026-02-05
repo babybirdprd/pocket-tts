@@ -178,16 +178,8 @@ fn run_streaming(model: &TTSModel, text: &str, voice_state: &pocket_tts::ModelSt
         let chunk = chunk_res?;
         // Convert tensor to 16-bit PCM
         let chunk = chunk.squeeze(0)?;
-        let data = chunk.to_vec2::<f32>()?;
-
-        for (i, _) in data[0].iter().enumerate() {
-            for channel_data in &data {
-                // Hard clamp to [-1, 1] to match Python's behavior
-                let val = channel_data[i].clamp(-1.0, 1.0);
-                let val = (val * 32767.0) as i16;
-                stdout.write_all(&val.to_le_bytes())?;
-            }
-        }
+        let bytes = pocket_tts::audio::pcm_i16_le_bytes(&chunk)?;
+        stdout.write_all(&bytes)?;
         stdout.flush()?;
     }
 
