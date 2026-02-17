@@ -118,8 +118,22 @@ fn resolve_voice_spec(model: &TTSModel, spec: &str) -> Result<pocket_tts::ModelS
     )
 }
 
-/// Resolve a predefined voice name to embeddings via HF Hub
+/// Resolve a predefined voice name to embeddings
+/// 
+/// First checks POCKET_TTS_VOICES_DIR environment variable for local voice files.
+/// Falls back to downloading from HuggingFace if not found locally.
 fn resolve_predefined_voice(model: &TTSModel, name: &str) -> Result<pocket_tts::ModelState> {
+    // Check for local voices directory first
+    if let Ok(voices_dir) = std::env::var("POCKET_TTS_VOICES_DIR") {
+        let local_file = PathBuf::from(&voices_dir).join(format!("{}.safetensors", name));
+        if local_file.exists() {
+            return model
+                .get_voice_state_from_prompt_file(&local_file)
+                .with_context(|| format!("Failed to load voice embeddings from {:?}", local_file));
+        }
+    }
+    
+    // Fall back to HuggingFace download
     let hf_path = format!("hf://{}/embeddings/{}.safetensors", STOCK_VOICE_REPO, name);
 
     let local_path = download_if_necessary(&hf_path)
