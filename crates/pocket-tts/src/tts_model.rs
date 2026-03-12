@@ -196,7 +196,19 @@ impl TTSModel {
                 .weights_path
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("weights_path not specified in config"))?;
-            let weights_file = crate::weights::download_if_necessary(weights_path)?;
+            let weights_result = crate::weights::download_if_necessary(weights_path);
+            let weights_file = match weights_result {
+                Ok(p) => p,
+                Err(e) => {
+                    println!("Gated weights failed: {}", e);
+                    let fallback_path = config
+                        .weights_path_without_voice_cloning
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("No fallback weights path available"))?;
+                    println!("Falling back to public version without voice cloning");
+                    crate::weights::download_if_necessary(fallback_path)?
+                }
+            };
 
             // Load safetensors with VarBuilder
             let vb =
