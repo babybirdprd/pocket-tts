@@ -31,6 +31,10 @@ pub struct FlowLMModel {
     pub bos_emb: Tensor,
     pub emb_mean: Tensor,
     pub emb_std: Tensor,
+    /// Optional learnable [1, 1, dim] BOS prepended to voice conditioning.
+    /// Present only when the YAML's `flow_lm.insert_bos_before_voice` is true,
+    /// matching the upstream Python `FlowLM.bos_before_voice` parameter.
+    pub bos_before_voice: Option<Tensor>,
     pub ldim: usize,
     pub dim: usize,
     pub noise_clamp: Option<f32>,
@@ -65,11 +69,25 @@ fn sample_noise(
 }
 
 impl FlowLMModel {
+    /// Backward-compatible constructor; `insert_bos_before_voice` defaults to false.
     pub fn new(
         flow_net: SimpleMLPAdaLN,
         transformer: StreamingTransformer,
         ldim: usize,
         dim: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        Self::new_with_flags(flow_net, transformer, ldim, dim, false, vb)
+    }
+
+    /// Construct a FlowLM, optionally loading the new `bos_before_voice`
+    /// parameter that newer model packagings ship in safetensors.
+    pub fn new_with_flags(
+        flow_net: SimpleMLPAdaLN,
+        transformer: StreamingTransformer,
+        ldim: usize,
+        dim: usize,
+        insert_bos_before_voice: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let input_linear = candle_nn::linear_no_bias(ldim, dim, vb.pp("input_linear"))?;
@@ -78,6 +96,12 @@ impl FlowLMModel {
         let bos_emb = vb.get(ldim, "bos_emb")?;
         let emb_mean = vb.get(ldim, "emb_mean")?;
         let emb_std = vb.get(ldim, "emb_std")?;
+        let bos_before_voice = if insert_bos_before_voice {
+            // Upstream stores this as shape [1, 1, dim].
+            Some(vb.get((1, 1, dim), "bos_before_voice")?)
+        } else {
+            None
+        };
 
         Ok(Self {
             flow_net,
@@ -88,6 +112,7 @@ impl FlowLMModel {
             bos_emb,
             emb_mean,
             emb_std,
+            bos_before_voice,
             ldim,
             dim,
             noise_clamp: None, // Default to no clamp

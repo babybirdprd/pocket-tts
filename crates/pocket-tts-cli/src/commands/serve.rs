@@ -7,6 +7,7 @@ use clap::{ArgAction, Parser, ValueEnum};
 use owo_colors::OwoColorize;
 
 use crate::voice::PREDEFINED_VOICES;
+use pocket_tts::config::defaults;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
@@ -36,13 +37,20 @@ pub struct ServeArgs {
     #[arg(short, long, default_value_t = 8000)]
     pub port: u16,
 
-    /// Default voice for API requests (can be overridden per-request)
-    #[arg(long, default_value = "alba")]
+    /// Default voice for API requests (can be overridden per-request).
+    /// If left empty, the language's recommended voice is used.
+    #[arg(long, default_value = "")]
     pub voice: String,
 
-    /// Model variant
-    #[arg(long, default_value = "b6369a24")]
-    pub variant: String,
+    /// Language model to load. One of: english, italian, french_24l, german,
+    /// spanish, portuguese, etc. Mutually exclusive with `--variant`.
+    #[arg(long, default_value = defaults::DEFAULT_LANGUAGE, conflicts_with = "variant")]
+    pub language: String,
+
+    /// Legacy: directly select a model YAML stem (e.g. "b6369a24").
+    /// Mutually exclusive with `--language`.
+    #[arg(long)]
+    pub variant: Option<String>,
 
     /// Sampling temperature
     #[arg(long, default_value = "0.7")]
@@ -85,15 +93,33 @@ pub struct ServeArgs {
     pub ui: UiMode,
 }
 
+impl ServeArgs {
+    /// Resolve which YAML stem to load. Returns the chosen stem and, when in
+    /// language mode, the language string for voice resolution.
+    pub fn resolved_stem(&self) -> (String, Option<&str>) {
+        match &self.variant {
+            Some(v) => (v.clone(), None),
+            None => (self.language.clone(), Some(self.language.as_str())),
+        }
+    }
+
+    /// Resolve which voice spec to use as the default. Empty `--voice`
+    /// becomes the language's recommended voice.
+    pub fn resolved_default_voice(&self) -> String {
+        if self.voice.trim().is_empty() {
+            let (_, lang) = self.resolved_stem();
+            pocket_tts::config::language_defaults::default_voice(lang).to_string()
+        } else {
+            self.voice.clone()
+        }
+    }
+}
+
 pub async fn run(args: ServeArgs) -> Result<()> {
     print_banner();
 
-    println!(
-        "{} Loading model variant: {}",
-        "->".cyan(),
-        args.variant.yellow()
-    );
-
+    let (stem, _lang) = args.resolved_stem();
+    println!("{} Loading model: {}", "->".cyan(), stem.yellow());
     println!("{} UI mode: {}", "->".cyan(), args.ui.as_str().yellow());
 
     let server_args = args.clone();
@@ -182,4 +208,57 @@ pub fn print_endpoints(host: &str, port: u16, ui_mode: UiMode) {
         base
     );
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Helper to construct ServeArgs with parser defaults applied.
+    fn parse_args(extra: &[&str]) -> ServeArgs {
+        let mut argv = vec!["test"];
+        argv.extend_from_slice(extra);
+        ServeArgs::try_parse_from(argv).expect("ServeArgs should parse")
+    }
+
+    #[test]
+    fn test_default_resolves_to_english_language() {
+        let args = parse_args(&[]);
+        let (stem, lang) = args.resolved_stem();
+        assert_eq!(stem, "english");
+        assert_eq!(lang, Some("english"));
+        assert_eq!(args.resolved_default_voice(), "alba");
+    }
+
+    #[test]
+    fn test_explicit_language_italian() {
+        let args = parse_args(&["--language", "italian"]);
+        let (stem, lang) = args.resolved_stem();
+        assert_eq!(stem, "italian");
+        assert_eq!(lang, Some("italian"));
+        assert_eq!(args.resolved_default_voice(), "giovanni");
+    }
+
+    #[test]
+    fn test_legacy_variant_disables_language_aware_voice() {
+        let args = parse_args(&["--variant", "b6369a24"]);
+        let (stem, lang) = args.resolved_stem();
+        assert_eq!(stem, "b6369a24");
+        assert!(lang.is_none());
+        // empty voice -> default voice fallback (no language => alba)
+        assert_eq!(args.resolved_default_voice(), "alba");
+    }
+
+    #[test]
+    fn test_language_and_variant_conflict() {
+        let res = ServeArgs::try_parse_from(["test", "--language", "italian", "--variant", "b6369a24"]);
+        assert!(res.is_err(), "language and variant must be mutually exclusive");
+    }
+
+    #[test]
+    fn test_explicit_voice_overrides_language_default() {
+        let args = parse_args(&["--language", "italian", "--voice", "alba"]);
+        assert_eq!(args.resolved_default_voice(), "alba");
+    }
 }

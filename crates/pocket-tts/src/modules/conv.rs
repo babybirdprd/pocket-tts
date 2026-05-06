@@ -281,10 +281,24 @@ pub struct ConvDownsample1d {
 }
 
 impl ConvDownsample1d {
+    /// Convenience constructor: in_channels = out_channels = `dimension`.
     pub fn new(stride: usize, dimension: usize, name: &str, vb: VarBuilder) -> Result<Self> {
+        Self::new_with_dims(stride, dimension, dimension, name, vb)
+    }
+
+    /// Build with explicit in/out channel counts. Mirrors Python's
+    /// `ConvDownsample1d(stride, dimension, out_dimension)` where
+    /// `out_dimension` defaults to `dimension`.
+    pub fn new_with_dims(
+        stride: usize,
+        in_dimension: usize,
+        out_dimension: usize,
+        name: &str,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let conv = StreamingConv1d::new(
-            dimension,
-            dimension,
+            in_dimension,
+            out_dimension,
             2 * stride,
             stride,
             1,
@@ -317,13 +331,28 @@ pub struct ConvTrUpsample1d {
 }
 
 impl ConvTrUpsample1d {
+    /// Convenience constructor: in_channels = out_channels = `dimension`.
     pub fn new(stride: usize, dimension: usize, name: &str, vb: VarBuilder) -> Result<Self> {
+        Self::new_with_dims(stride, dimension, dimension, name, vb)
+    }
+
+    /// Build with explicit in/out channel counts. Mirrors Python's
+    /// `ConvTrUpsample1d(stride, dimension, in_dimension)` where
+    /// `in_dimension` defaults to `dimension` and the conv is depthwise
+    /// (`groups = out_dimension`).
+    pub fn new_with_dims(
+        stride: usize,
+        in_dimension: usize,
+        out_dimension: usize,
+        name: &str,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let convtr = StreamingConvTranspose1d::new(
-            dimension,
-            dimension,
+            in_dimension,
+            out_dimension,
             2 * stride,
             stride,
-            dimension,
+            out_dimension,
             false,
             &format!("{}.convtr", name),
             vb.pp("convtr"),

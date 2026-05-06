@@ -3,6 +3,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use crate::commands::serve::{ServeArgs, UiMode};
+use pocket_tts::config::defaults;
 
 #[derive(Parser, Debug, Clone)]
 pub struct WasmDemoArgs {
@@ -35,8 +36,9 @@ pub async fn run(args: WasmDemoArgs) -> Result<()> {
     let serve_args = ServeArgs {
         host: args.host,
         port: args.port,
-        voice: "alba".to_string(),
-        variant: "b6369a24".to_string(),
+        voice: String::new(), // empty -> language default voice
+        language: defaults::DEFAULT_LANGUAGE.to_string(),
+        variant: None,
         temperature: 0.7,
         lsd_decode_steps: 1,
         eos_threshold: -4.0,

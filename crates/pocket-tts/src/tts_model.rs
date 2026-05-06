@@ -46,6 +46,19 @@ pub struct TTSModel {
     pub ldim: usize,
     /// Device
     pub device: Device,
+    /// When `Some`, replaces `estimate_frames_after_eos`'s text-length heuristic
+    /// with this exact frame count after EOS. Mirrors Python's
+    /// `Config.model_recommended_frames_after_eos` (e.g. french_24l.yaml: 8).
+    pub frames_after_eos_override: Option<usize>,
+    /// When true, prepend leading spaces to short text inputs in
+    /// `prepare_text_prompt`. Mirrors Python's
+    /// `Config.pad_with_spaces_for_short_inputs`.
+    /// Defaults to `true` to preserve legacy Rust behavior on the
+    /// `b6369a24` variant; new language YAMLs explicitly set this.
+    pub pad_with_spaces_for_short_inputs: bool,
+    /// When true, strip semicolons from text during preprocessing instead of
+    /// treating them as pause markers. Mirrors Python's `Config.remove_semicolons`.
+    pub remove_semicolons: bool,
 }
 
 impl TTSModel {
@@ -318,7 +331,14 @@ impl TTSModel {
             vb.pp("flow_lm.transformer"),
         )?;
 
-        let mut flow_lm = FlowLMModel::new(flow_net, transformer, ldim, dim, vb.pp("flow_lm"))?;
+        let mut flow_lm = FlowLMModel::new_with_flags(
+            flow_net,
+            transformer,
+            ldim,
+            dim,
+            config.flow_lm.insert_bos_before_voice,
+            vb.pp("flow_lm"),
+        )?;
         flow_lm.noise_clamp = noise_clamp;
 
         // Build Mimi components
@@ -389,7 +409,7 @@ impl TTSModel {
         let hop_length: usize = seanet_cfg.ratios.iter().product();
         let encoder_frame_rate = config.mimi.sample_rate as f64 / hop_length as f64;
 
-        let mimi = MimiModel::new(
+        let mimi = MimiModel::new_with_dims(
             encoder,
             decoder,
             encoder_transformer,
@@ -400,13 +420,23 @@ impl TTSModel {
             config.mimi.channels,
             config.mimi.quantizer.dimension,
             config.mimi.quantizer.output_dimension,
+            config.mimi.inner_dim,
+            config.mimi.outer_dim,
             "mimi",
             vb.pp("mimi"),
         )?;
 
-        // Load speaker projection weight - uses mimi output dimension, not internal ldim
-        let mimi_out_dim = config.mimi.quantizer.output_dimension;
-        let speaker_proj_weight = vb.get((dim, mimi_out_dim), "flow_lm.speaker_proj_weight")?;
+        // speaker_proj_weight shape mirrors Python's
+        //   torch.zeros((d_model, inner_dim or seanet.dimension))
+        // For legacy `b6369a24` (inner_dim=None), this resolves to
+        // seanet.dimension=512, matching the prior `quantizer.output_dimension`
+        // by coincidence. For new language models with inner_dim=32, this
+        // shrinks to (1024, 32) so the safetensors load matches.
+        let speaker_dim = config
+            .mimi
+            .inner_dim
+            .unwrap_or(config.mimi.seanet.dimension);
+        let speaker_proj_weight = vb.get((dim, speaker_dim), "flow_lm.speaker_proj_weight")?;
 
         Ok(Self {
             flow_lm,
@@ -422,6 +452,13 @@ impl TTSModel {
             dim,
             ldim,
             device,
+            // The next three fields default to upstream's Pydantic defaults
+            // (None / false). This intentionally drops the prior Rust-only
+            // "always pad short inputs" behavior so output matches Python's
+            // default exactly. Legacy YAMLs without these fields opt out.
+            frames_after_eos_override: config.model_recommended_frames_after_eos,
+            pad_with_spaces_for_short_inputs: config.pad_with_spaces_for_short_inputs,
+            remove_semicolons: config.remove_semicolons,
         })
     }
 
@@ -462,28 +499,70 @@ impl TTSModel {
         self.get_voice_state_from_tensor(&audio)
     }
 
-    /// Create voice state from a pre-calculated latent prompt file (.safetensors)
+    /// Create voice state from a pre-calculated latent prompt file (.safetensors).
+    ///
+    /// Supports two safetensors formats:
+    ///
+    /// 1. **Rust-port format** (legacy): a single tensor named `audio_prompt`
+    ///    of shape `[B, T, dim]` already projected into flow LM space. This
+    ///    path runs `run_flow_lm_prompt` to populate KV-cache state at load time.
+    ///
+    /// 2. **Upstream Python `export_model_state` format** (current HF voices):
+    ///    keys of the form `{module_name}/{tensor_key}` with a per-layer
+    ///    `cache` tensor of shape `[2, B, T, H, D]` and an `offset` int64
+    ///    tensor. State is imported directly without re-running the transformer.
+    ///    Used by predefined voices at
+    ///    `kyutai/pocket-tts-without-voice-cloning/languages/{lang}/embeddings/`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn get_voice_state_from_prompt_file<P: AsRef<std::path::Path>>(
         &self,
         path: P,
     ) -> Result<ModelState> {
         let tensors = candle_core::safetensors::load(path, &self.device)?;
-        let prompt = tensors
-            .get("audio_prompt")
-            .ok_or_else(|| anyhow::anyhow!("'audio_prompt' not found in safetensors file"))?;
-
-        self.get_voice_state_from_prompt_tensor(prompt)
+        self.voice_state_from_loaded_tensors(tensors)
     }
 
     /// Create voice state from pre-calculated latent prompt bytes (.safetensors)
     pub fn get_voice_state_from_prompt_bytes(&self, bytes: &[u8]) -> Result<ModelState> {
         let tensors = candle_core::safetensors::load_buffer(bytes, &self.device)?;
-        let prompt = tensors
-            .get("audio_prompt")
-            .ok_or_else(|| anyhow::anyhow!("'audio_prompt' not found in safetensors bytes"))?;
+        self.voice_state_from_loaded_tensors(tensors)
+    }
 
-        self.get_voice_state_from_prompt_tensor(prompt)
+    /// Common path for both `get_voice_state_from_prompt_file` and `_bytes`.
+    /// Detects format and dispatches accordingly.
+    fn voice_state_from_loaded_tensors(
+        &self,
+        tensors: std::collections::HashMap<String, candle_core::Tensor>,
+    ) -> Result<ModelState> {
+        if let Some(prompt) = tensors.get("audio_prompt") {
+            // Legacy Rust-port format
+            return self.get_voice_state_from_prompt_tensor(prompt);
+        }
+
+        // Detect upstream `export_model_state` format: keys contain '/'.
+        let is_upstream_state = tensors.keys().any(|k| k.contains('/'));
+        if is_upstream_state {
+            // Upstream rooted state at FlowLM; Rust uses fully-qualified
+            // module names, so prepend "flow_lm".
+            let state = crate::voice_state::import_model_state_from_tensors(
+                tensors,
+                &self.device,
+                "flow_lm",
+            )?;
+            return Ok(state);
+        }
+
+        let key_sample = tensors
+            .keys()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(anyhow::anyhow!(
+            "voice safetensors did not contain an 'audio_prompt' tensor or a \
+             'module_name/tensor_key' state-dict; got keys: {}",
+            key_sample
+        ))
     }
 
     /// Create voice state from a pre-calculated latent prompt tensor
@@ -552,6 +631,16 @@ impl TTSModel {
         let conditioning_2d = latents_2d.matmul(&self.speaker_proj_weight.t()?)?;
         let conditioning = conditioning_2d.reshape((b, t, self.dim))?;
 
+        // When the model was trained with `insert_bos_before_voice=True`,
+        // prepend the learnable bos_before_voice token to the voice
+        // conditioning before running the flow LM. Mirrors Python's
+        // `tts_model.py:894`:
+        //   prompt = torch.cat([self.flow_lm.bos_before_voice, prompt], dim=1)
+        let conditioning = match &self.flow_lm.bos_before_voice {
+            Some(bos) => Tensor::cat(&[bos, &conditioning], 1)?,
+            None => conditioning,
+        };
+
         // Run flow_lm with audio conditioning to update state
         let mut flow_state = init_states(1, 1000);
         self.run_flow_lm_prompt(&conditioning, &mut flow_state)?;
@@ -604,7 +693,11 @@ impl TTSModel {
     pub fn split_into_best_sentences(&self, text: &str) -> Vec<String> {
         const MAX_TOKENS_PER_CHUNK: usize = 50;
 
-        let prepared_text = prepare_text_prompt(text);
+        let prepared_text = prepare_text_prompt(
+            text,
+            self.pad_with_spaces_for_short_inputs,
+            self.remove_semicolons,
+        );
 
         // 1. Initial split by punctuation to respect sentence boundaries
         let raw_sentences: Vec<&str> = prepared_text
@@ -772,7 +865,11 @@ impl TTSModel {
 
         for chunk_text in chunks {
             let mut state = voice_state.clone();
-            let prepared_text = prepare_text_prompt(&chunk_text);
+            let prepared_text = prepare_text_prompt(
+                &chunk_text,
+                self.pad_with_spaces_for_short_inputs,
+                self.remove_semicolons,
+            );
 
             let tokens = self.conditioner.prepare(&prepared_text, &self.device)?;
             let text_embeddings = self.conditioner.forward(&tokens)?;
@@ -783,7 +880,13 @@ impl TTSModel {
                 .forward(&text_embeddings, &mut state, 0)?;
 
             let max_gen_len = (prepared_text.split_whitespace().count() + 2) * 13;
-            let frames_after_eos = estimate_frames_after_eos(&chunk_text);
+            // Mirrors Python: prefer the YAML's recommended frame count
+            // when set, else fall back to the text-length heuristic.
+            // Python adds +2 to account for the EOS token detection delay.
+            let frames_after_eos = match self.frames_after_eos_override {
+                Some(n) => n + 2,
+                None => estimate_frames_after_eos(&chunk_text),
+            };
 
             let mut backbone_input = self.flow_lm.bos_emb.clone().reshape((1, 1, self.ldim))?;
             let mut eos_step: Option<usize> = None;
@@ -941,7 +1044,11 @@ impl TTSModel {
         let mut mimi_state = init_states(1, 1000);
 
         // Prepare text
-        let prepared_text = prepare_text_prompt(&text);
+        let prepared_text = prepare_text_prompt(
+            &text,
+            self.pad_with_spaces_for_short_inputs,
+            self.remove_semicolons,
+        );
 
         // Error handling for preparation failures inside the iterator
         let tokens = match self.conditioner.prepare(&prepared_text, &self.device) {
@@ -966,7 +1073,14 @@ impl TTSModel {
         // Removed redundant increment_steps("offset") - handled internally by RoPE/Attention with current_end_len
 
         let max_gen_len = (prepared_text.split_whitespace().count() + 2) * 13;
-        let frames_after_eos = estimate_frames_after_eos(&text);
+        // Mirrors Python: when the YAML provides a recommended frame count,
+        // use it directly (no +2). Otherwise fall back to the text-length
+        // heuristic, which already includes the +2 that upstream adds to the
+        // `frames_after_eos_guess` from `prepare_text_prompt`.
+        let frames_after_eos = match self.frames_after_eos_override {
+            Some(n) => n,
+            None => estimate_frames_after_eos(&text),
+        };
 
         let mut backbone_input = match self.flow_lm.bos_emb.clone().reshape((1, 1, self.ldim)) {
             Ok(t) => t,
@@ -1126,7 +1240,11 @@ impl TTSModel {
         })
     }
     pub fn estimate_generation_steps(&self, text: &str) -> usize {
-        let prepared = prepare_text_prompt(text);
+        let prepared = prepare_text_prompt(
+            text,
+            self.pad_with_spaces_for_short_inputs,
+            self.remove_semicolons,
+        );
         (prepared.split_whitespace().count() + 2) * 13
     }
 }
@@ -1190,8 +1308,20 @@ fn find_config_path(variant: &str) -> Result<std::path::PathBuf> {
     )
 }
 
-/// Prepare text for generation, stripping pause markers for TTS processing
-fn prepare_text_prompt(text: &str) -> String {
+/// Prepare text for generation. Mirrors Python's
+/// `prepare_text_prompt(text, pad_with_spaces_for_short_inputs, remove_semicolons)`
+/// in `pocket_tts/models/tts_model.py`, with the addition of explicit
+/// pause-marker stripping (Rust-only feature).
+///
+/// - When `remove_semicolons` is true, `;` is replaced with `,` (not deleted)
+///   to match upstream's text preprocessing.
+/// - When `pad_with_spaces_for_short_inputs` is true, prepend 8 spaces to
+///   inputs of fewer than 5 words.
+fn prepare_text_prompt(
+    text: &str,
+    pad_with_spaces_for_short_inputs: bool,
+    remove_semicolons: bool,
+) -> String {
     // First strip any explicit pause markers
     let text = crate::pause::strip_pause_markers(text);
 
@@ -1201,6 +1331,10 @@ fn prepare_text_prompt(text: &str) -> String {
     }
 
     text = text.replace(['\n', '\r'], " ").replace("  ", " ");
+
+    if remove_semicolons {
+        text = text.replace(';', ",");
+    }
 
     let word_count = text.split_whitespace().count();
 
@@ -1218,8 +1352,8 @@ fn prepare_text_prompt(text: &str) -> String {
         text.push('.');
     }
 
-    // Python logic: prepend spaces if too short
-    if word_count < 5 {
+    // Python logic: prepend spaces if too short, gated on the YAML flag.
+    if pad_with_spaces_for_short_inputs && word_count < 5 {
         text = format!("{}{}", " ".repeat(8), text);
     }
 
@@ -1241,16 +1375,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_prepare_text_prompt() {
-        // Short texts (<5 words) get 8 spaces prepended
-        assert_eq!(prepare_text_prompt("hello world"), "        Hello world.");
-        assert_eq!(prepare_text_prompt("Hello world."), "        Hello world.");
-        assert_eq!(prepare_text_prompt("  hello  "), "        Hello.");
-        // Long texts don't get spaces
+    fn test_prepare_text_prompt_padded() {
+        // With padding gate ON, short texts (<5 words) get 8 spaces prepended.
         assert_eq!(
-            prepare_text_prompt("one two three four five"),
+            prepare_text_prompt("hello world", true, false),
+            "        Hello world."
+        );
+        assert_eq!(
+            prepare_text_prompt("Hello world.", true, false),
+            "        Hello world."
+        );
+        assert_eq!(
+            prepare_text_prompt("  hello  ", true, false),
+            "        Hello."
+        );
+        // Long texts don't get spaces.
+        assert_eq!(
+            prepare_text_prompt("one two three four five", true, false),
             "One two three four five."
         );
+    }
+
+    #[test]
+    fn test_prepare_text_prompt_unpadded() {
+        // With padding gate OFF (upstream's Pydantic default), short texts
+        // are NOT prepended with spaces, even if <5 words.
+        assert_eq!(
+            prepare_text_prompt("hello world", false, false),
+            "Hello world."
+        );
+        assert_eq!(
+            prepare_text_prompt("one two three four five", false, false),
+            "One two three four five."
+        );
+    }
+
+    #[test]
+    fn test_prepare_text_prompt_remove_semicolons() {
+        // remove_semicolons replaces ';' with ',' (matches upstream).
+        let with = prepare_text_prompt("hello; world", false, true);
+        let without = prepare_text_prompt("hello; world", false, false);
+        assert!(with.contains(','), "expected comma in `{}`", with);
+        assert!(!with.contains(';'), "expected no semicolon in `{}`", with);
+        assert!(without.contains(';'), "expected raw `;` in `{}`", without);
     }
 
     #[test]
@@ -1265,7 +1432,7 @@ mod tests {
     #[test]
     fn test_prepare_text_prompt_strips_pause_markers() {
         // Pause markers should be stripped from text
-        let result = prepare_text_prompt("Hello [pause:500ms] world");
+        let result = prepare_text_prompt("Hello [pause:500ms] world", false, false);
         // The pause marker should be gone, replaced with space
         assert!(!result.contains("[pause:"));
         assert!(result.contains("Hello"));
@@ -1274,7 +1441,8 @@ mod tests {
 
     #[test]
     fn test_prepare_text_prompt_handles_multiple_pauses() {
-        let result = prepare_text_prompt("One [pause:100ms] two [pause:1s] three");
+        let result =
+            prepare_text_prompt("One [pause:100ms] two [pause:1s] three", false, false);
         assert!(!result.contains("[pause:"));
         assert!(result.contains("One"));
         assert!(result.contains("two"));

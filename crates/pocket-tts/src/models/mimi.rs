@@ -53,6 +53,9 @@ pub struct MimiModel {
 }
 
 impl MimiModel {
+    /// Convenience constructor that mirrors the legacy behavior where the
+    /// downsample and upsample layers preserve `output_dimension` channels.
+    /// Equivalent to `new_with_dims(.., None, None)`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         encoder: SEANetEncoder,
@@ -68,19 +71,71 @@ impl MimiModel {
         name: &str,
         vb: VarBuilder,
     ) -> Result<Self> {
+        Self::new_with_dims(
+            encoder,
+            decoder,
+            encoder_transformer,
+            decoder_transformer,
+            frame_rate,
+            encoder_frame_rate,
+            sample_rate,
+            channels,
+            dimension,
+            output_dimension,
+            None,
+            None,
+            name,
+            vb,
+        )
+    }
+
+    /// Full constructor exposing inner/outer dim overrides for downsample/upsample.
+    ///
+    /// Mirrors Python's MimiModel where:
+    /// - `inner_dim` is the post-downsample channel count (defaults to
+    ///   `encoder.dimension`, i.e. legacy behaviour).
+    /// - `outer_dim` is the pre-upsample channel count (defaults to
+    ///   `encoder.dimension`).
+    ///
+    /// For language models like english.yaml / italian.yaml,
+    /// `inner_dim = 32` shrinks latents fed into the quantizer, while
+    /// `outer_dim = 512` keeps the upsample input shape unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_dims(
+        encoder: SEANetEncoder,
+        decoder: SEANetDecoder,
+        encoder_transformer: ProjectedTransformer,
+        decoder_transformer: ProjectedTransformer,
+        frame_rate: f64,
+        encoder_frame_rate: f64,
+        sample_rate: usize,
+        channels: usize,
+        dimension: usize,        // The quantizer input dimension (32)
+        output_dimension: usize, // The decoder input dimension (512)
+        inner_dim: Option<usize>,
+        outer_dim: Option<usize>,
+        name: &str,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let quantizer = Quantizer::new(dimension, output_dimension, vb.pp("quantizer"))?;
 
         let (downsample, upsample) = if encoder_frame_rate != frame_rate {
             let stride = (encoder_frame_rate / frame_rate) as usize;
+            // Default inner/outer dims to `output_dimension` so legacy
+            // models without these YAML fields keep their old shapes.
+            let inner = inner_dim.unwrap_or(output_dimension);
+            let outer = outer_dim.unwrap_or(output_dimension);
             (
-                Some(ConvDownsample1d::new(
+                Some(ConvDownsample1d::new_with_dims(
                     stride,
                     output_dimension,
+                    inner,
                     &format!("{}.downsample", name),
                     vb.pp("downsample"),
                 )?),
-                Some(ConvTrUpsample1d::new(
+                Some(ConvTrUpsample1d::new_with_dims(
                     stride,
+                    outer,
                     output_dimension,
                     &format!("{}.upsample", name),
                     vb.pp("upsample"),
