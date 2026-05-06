@@ -249,6 +249,29 @@ mod tests {
     }
 
     #[test]
+    fn test_french_24l_config_parses_new_fields() {
+        let path = crate_config_dir().join("french_24l.yaml");
+        let config = load_config(&path).expect("Failed to load french_24l config");
+        // french_24l.yaml is the only bundled YAML that exercises BOTH
+        // remove_semicolons=true and model_recommended_frames_after_eos=8.
+        assert!(config.remove_semicolons);
+        assert_eq!(config.model_recommended_frames_after_eos, Some(8));
+        assert!(config.flow_lm.insert_bos_before_voice);
+        assert_eq!(config.mimi.inner_dim, Some(32));
+        assert_eq!(config.mimi.outer_dim, Some(512));
+    }
+
+    #[test]
+    fn test_english_2026_01_config_padding_flag() {
+        let path = crate_config_dir().join("english_2026-01.yaml");
+        let config = load_config(&path).expect("Failed to load english_2026-01 config");
+        // Only YAML that turns padding on.
+        assert!(config.pad_with_spaces_for_short_inputs);
+        // BOS-before-voice is *off* in this 2026-01 model.
+        assert!(!config.flow_lm.insert_bos_before_voice);
+    }
+
+    #[test]
     fn test_load_legacy_b6369a24_config() {
         let path = crate_config_dir().join("b6369a24.yaml");
         let config = load_config(&path).expect("Failed to load b6369a24 config");
