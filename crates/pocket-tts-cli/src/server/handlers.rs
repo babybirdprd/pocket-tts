@@ -1,7 +1,7 @@
 //! HTTP request handlers
 
 use crate::server::state::{AppState, VoiceStateCache};
-use crate::voice::{resolve_voice, voice_cache_key};
+use crate::voice::{resolve_voice_for_language, voice_cache_key};
 #[cfg(feature = "web-ui")]
 use axum::extract::Path;
 #[cfg(feature = "web-ui")]
@@ -168,6 +168,7 @@ fn resolve_voice_cached(
     default_voice: &SharedVoiceState,
     voice_cache: &VoiceCache,
     voice_spec: Option<&str>,
+    language: Option<&str>,
 ) -> anyhow::Result<SharedVoiceState> {
     let Some(spec) = voice_spec else {
         return Ok(default_voice.clone());
@@ -184,7 +185,8 @@ fn resolve_voice_cached(
         }
     }
 
-    let resolved = std::sync::Arc::new(resolve_voice(model, Some(spec))?);
+    let resolved =
+        std::sync::Arc::new(resolve_voice_for_language(model, Some(spec), language)?);
     let mut cache = voice_cache
         .lock()
         .map_err(|_| anyhow::anyhow!("voice cache lock poisoned"))?;
@@ -204,12 +206,18 @@ pub async fn generate(
     let voice_cache = state.voice_cache.clone();
     let text = payload.text.clone();
     let voice_spec = payload.voice.clone();
+    let language = state.language.clone();
 
     // Run generation in blocking thread
     let result = tokio::task::spawn_blocking(move || {
         // Resolve voice (use default if not specified)
-        let voice_state =
-            resolve_voice_cached(&model, &default_voice, &voice_cache, voice_spec.as_deref())?;
+        let voice_state = resolve_voice_cached(
+            &model,
+            &default_voice,
+            &voice_cache,
+            voice_spec.as_deref(),
+            language.as_deref(),
+        )?;
 
         // Override model params if provided in request
         let mut model_cloned = (*model).clone();
@@ -288,6 +296,7 @@ pub async fn generate_stream(
     let voice_cache = state.voice_cache.clone();
     let text = payload.text.clone();
     let voice_spec = payload.voice.clone();
+    let language = state.language.clone();
     let lock = state.lock.clone();
 
     // Channel for streaming chunks
@@ -300,8 +309,13 @@ pub async fn generate_stream(
         let tx_inner = tx.clone();
         let result = tokio::task::spawn_blocking(move || {
             // Resolve voice
-            let voice_state =
-                resolve_voice_cached(&model, &default_voice, &voice_cache, voice_spec.as_deref())?;
+            let voice_state = resolve_voice_cached(
+                &model,
+                &default_voice,
+                &voice_cache,
+                voice_spec.as_deref(),
+                language.as_deref(),
+            )?;
 
             // Override model params if provided in request
             let mut model_cloned = (*model).clone();

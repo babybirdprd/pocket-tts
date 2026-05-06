@@ -74,6 +74,10 @@ pub struct AppState {
     pub ui_mode: UiMode,
     /// Filesystem location of generated WASM JS/WASM assets.
     pub wasm_pkg_dir: PathBuf,
+    /// Language stem the server was started with (e.g. "english", "italian").
+    /// `None` indicates the legacy `--variant` path; predefined voices fall back
+    /// to the non-language-aware HF embedding path.
+    pub language: Option<String>,
 }
 
 impl AppState {
@@ -83,6 +87,7 @@ impl AppState {
         voice_cache_capacity: usize,
         ui_mode: UiMode,
         wasm_pkg_dir: PathBuf,
+        language: Option<String>,
     ) -> Self {
         Self {
             model: Arc::new(model),
@@ -91,6 +96,7 @@ impl AppState {
             lock: Arc::new(Mutex::new(())),
             ui_mode,
             wasm_pkg_dir,
+            language,
         }
     }
 }
