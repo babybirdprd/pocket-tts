@@ -12,13 +12,26 @@ use pocket_tts::weights::download_if_necessary;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-/// Predefined stock voices from kyutai/pocket-tts-without-voice-cloning
+/// Predefined stock voices from kyutai/pocket-tts-without-voice-cloning.
+///
+/// Mirrors Python's `_ORIGINS_OF_PREDEFINED_VOICES` keys plus the
+/// per-language defaults (giovanni/lola/juergen/rafael/estelle).
 pub const PREDEFINED_VOICES: &[&str] = &[
+    // Original 8 retained for backward compatibility
     "alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma",
+    // Upstream additions
+    "anna", "vera", "charles", "paul", "george", "mary", "jane", "michael", "eve",
+    "bill_boerst", "peter_yearsley", "stuart_bell", "caro_davy",
+    // Per-language default voices
+    "giovanni", "lola", "juergen", "rafael", "estelle",
 ];
 
 /// HuggingFace repo for stock voice embeddings
 const STOCK_VOICE_REPO: &str = "kyutai/pocket-tts-without-voice-cloning";
+
+/// HF commit pin for per-language voice embeddings, matching Python's
+/// `get_predefined_voice` in pocket_tts/utils/utils.py.
+const STOCK_VOICE_REVISION: &str = "e041936c75475d350b405bc870bcf7c22da4e9e6";
 
 /// Build a stable cache key for a voice specification.
 ///
@@ -64,30 +77,54 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-/// Resolve a voice specification to a ModelState
+/// Resolve a voice specification to a ModelState.
+///
+/// Backward-compatible wrapper that uses the legacy (non-language-aware)
+/// embedding path. New code should prefer [`resolve_voice_for_language`].
+pub fn resolve_voice(model: &TTSModel, voice_spec: Option<&str>) -> Result<pocket_tts::ModelState> {
+    resolve_voice_for_language(model, voice_spec, None)
+}
+
+/// Resolve a voice specification with optional language context.
+///
+/// When `language` is `Some`, predefined voices are downloaded from
+/// `kyutai/pocket-tts-without-voice-cloning/languages/{language}/embeddings/{name}.safetensors`
+/// (matching Python's `get_predefined_voice`). When `None`, the legacy flat
+/// `embeddings/{name}.safetensors` path is used for backward compat with
+/// the `b6369a24` variant.
 ///
 /// Supports multiple input formats:
-/// - Predefined names: "alba", "marius", etc.
+/// - Predefined names: "alba", "giovanni", etc.
 /// - Local paths: "/path/to/audio.wav" or "/path/to/embeddings.safetensors"
 /// - HF URLs: "hf://owner/repo/file.wav"
 /// - Base64 audio: "data:audio/wav;base64,..." or raw base64 string
-pub fn resolve_voice(model: &TTSModel, voice_spec: Option<&str>) -> Result<pocket_tts::ModelState> {
+pub fn resolve_voice_for_language(
+    model: &TTSModel,
+    voice_spec: Option<&str>,
+    language: Option<&str>,
+) -> Result<pocket_tts::ModelState> {
     match voice_spec {
-        Some(spec) => resolve_voice_spec(model, spec),
+        Some(spec) => resolve_voice_spec(model, spec, language),
         None => {
-            // Default to "alba" stock voice
-            resolve_predefined_voice(model, "alba")
+            // Default voice depends on language; mirrors Python's
+            // get_default_voice_for_language.
+            let name = pocket_tts::config::language_defaults::default_voice(language);
+            resolve_predefined_voice(model, name, language)
         }
     }
 }
 
 /// Resolve a specific voice specification
-fn resolve_voice_spec(model: &TTSModel, spec: &str) -> Result<pocket_tts::ModelState> {
+fn resolve_voice_spec(
+    model: &TTSModel,
+    spec: &str,
+    language: Option<&str>,
+) -> Result<pocket_tts::ModelState> {
     let spec = spec.trim();
 
     // 1. Check if it's a predefined voice name
     if PREDEFINED_VOICES.contains(&spec) {
-        return resolve_predefined_voice(model, spec);
+        return resolve_predefined_voice(model, spec, language);
     }
 
     // 2. Check if it's an hf:// URL
@@ -118,9 +155,23 @@ fn resolve_voice_spec(model: &TTSModel, spec: &str) -> Result<pocket_tts::ModelS
     )
 }
 
-/// Resolve a predefined voice name to embeddings via HF Hub
-fn resolve_predefined_voice(model: &TTSModel, name: &str) -> Result<pocket_tts::ModelState> {
-    let hf_path = format!("hf://{}/embeddings/{}.safetensors", STOCK_VOICE_REPO, name);
+/// Resolve a predefined voice name to embeddings via HF Hub.
+///
+/// When `language` is `Some`, uses the language-aware path with the upstream
+/// commit pin: `languages/{language}/embeddings/{name}.safetensors@<rev>`.
+/// When `None`, uses the legacy flat path for backward compat.
+fn resolve_predefined_voice(
+    model: &TTSModel,
+    name: &str,
+    language: Option<&str>,
+) -> Result<pocket_tts::ModelState> {
+    let hf_path = match language {
+        Some(lang) => format!(
+            "hf://{}/languages/{}/embeddings/{}.safetensors@{}",
+            STOCK_VOICE_REPO, lang, name, STOCK_VOICE_REVISION
+        ),
+        None => format!("hf://{}/embeddings/{}.safetensors", STOCK_VOICE_REPO, name),
+    };
 
     let local_path = download_if_necessary(&hf_path)
         .with_context(|| format!("Failed to download stock voice '{}'", name))?;
@@ -230,6 +281,18 @@ mod tests {
         assert!(PREDEFINED_VOICES.contains(&"alba"));
         assert!(PREDEFINED_VOICES.contains(&"marius"));
         assert!(!PREDEFINED_VOICES.contains(&"unknown"));
+    }
+
+    #[test]
+    fn test_predefined_voices_includes_language_defaults() {
+        // Ensure new per-language default voices are recognized
+        for v in ["giovanni", "lola", "juergen", "rafael", "estelle"] {
+            assert!(
+                PREDEFINED_VOICES.contains(&v),
+                "{} should be a predefined voice",
+                v
+            );
+        }
     }
 
     #[test]

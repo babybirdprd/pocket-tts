@@ -31,6 +31,13 @@ enum Commands {
     /// Supports voice cloning using predefined voices or custom audio files.
     Generate(commands::generate::GenerateArgs),
 
+    /// Encode a voice prompt and save the result to a .safetensors file.
+    ///
+    /// Mirrors Python's `pocket-tts export-voice`. The output format matches
+    /// upstream's `export_model_state` and can be re-imported by both the
+    /// Rust and Python implementations.
+    ExportVoice(commands::export_voice::ExportVoiceArgs),
+
     /// Start the HTTP API server
     ///
     /// Runs a web server providing TTS generation via REST API.
@@ -52,6 +59,7 @@ async fn main() -> Result<()> {
             // Generate is CPU-bound, run synchronously
             commands::generate::run(cmd_args)
         }
+        Commands::ExportVoice(cmd_args) => commands::export_voice::run(cmd_args),
         Commands::Serve(cmd_args) => commands::serve::run(cmd_args).await,
         Commands::WasmDemo(cmd_args) => commands::wasm_demo::run(cmd_args).await,
     }

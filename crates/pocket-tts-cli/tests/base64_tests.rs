@@ -32,7 +32,7 @@ fn create_test_app() -> Option<axum::Router> {
     let wasm_pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../pocket-tts/pkg")
         .to_path_buf();
-    let state = AppState::new(model, default_voice, 64, UiMode::Standard, wasm_pkg_dir);
+    let state = AppState::new(model, default_voice, 64, UiMode::Standard, wasm_pkg_dir, None);
     Some(routes::create_router(state))
 }
 

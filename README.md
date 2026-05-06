@@ -157,20 +157,47 @@ let model = TTSModel::load_with_params(
 ### HuggingFace token
 If you're using a model that has to be downloaded from huggingface you will need a token in the `HF_TOKEN` environment variable
 
+## Multi-language support
+
+The Rust port now ships configs for all 12 upstream languages, matching
+`kyutai-labs/pocket-tts` v2.1.0. Select one with `--language`:
+
+| Language stem        | Default voice | Tier             |
+|----------------------|---------------|------------------|
+| `english` *(default)*| `alba`        | distilled        |
+| `english_2026-01`    | `alba`        | distilled, padded |
+| `english_2026-04`    | `alba`        | distilled        |
+| `french_24l`         | `estelle`     | 24-layer preview |
+| `german`             | `juergen`     | distilled        |
+| `german_24l`         | `juergen`     | 24-layer preview |
+| `italian`            | `giovanni`    | distilled        |
+| `italian_24l`        | `giovanni`    | 24-layer preview |
+| `portuguese`         | `rafael`      | distilled        |
+| `portuguese_24l`     | `rafael`      | 24-layer preview |
+| `spanish`            | `lola`        | distilled        |
+| `spanish_24l`        | `lola`        | 24-layer preview |
+
+Legacy `--variant b6369a24` continues to work for the original Rust-port
+weights.
+
 ## CLI Reference
 
 ### `generate` command
 
-Generate audio from text and save to a WAV file.
+Generate audio from text and save to a WAV file. Reads text from `--text`,
+piped stdin, or falls back to a localized greeting for the chosen language.
 
 ```
 pocket-tts generate [OPTIONS]
 
 Options:
-  -t, --text <TEXT>              Text to synthesize [default: greeting]
-  -v, --voice <VOICE>            Voice: predefined name, .wav file, or .safetensors
+  -t, --text <TEXT>              Text to synthesize. Optional; reads stdin if piped.
+  -v, --voice <VOICE>            Voice: predefined name, .wav file, or .safetensors.
+                                 Defaults to the language's recommended voice.
   -o, --output <PATH>            Output file [default: output.wav]
-      --variant <VARIANT>        Model variant [default: b6369a24]
+      --language <LANG>          Language model [default: english]
+      --variant <VARIANT>        Legacy: directly select a YAML stem (e.g. b6369a24).
+                                 Mutually exclusive with --language.
       --temperature <FLOAT>      Sampling temperature [default: 0.7]
       --lsd-decode-steps <INT>   LSD decode steps [default: 1]
       --eos-threshold <FLOAT>    EOS threshold [default: -4.0]
@@ -179,7 +206,35 @@ Options:
       --use-metal                Use Metal acceleration (macOS)
 ```
 
-**Predefined voices:** `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`
+```bash
+# Generate Italian speech with the default Italian voice (giovanni):
+pocket-tts generate --language italian
+
+# Pipe text from stdin:
+echo "Ciao mondo" | pocket-tts generate --language italian
+```
+
+**Predefined voices** (26 total):
+`alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`,
+`anna`, `vera`, `charles`, `paul`, `george`, `mary`, `jane`, `michael`, `eve`,
+`bill_boerst`, `peter_yearsley`, `stuart_bell`, `caro_davy`,
+plus the per-language defaults `giovanni` (it), `lola` (es), `juergen` (de),
+`rafael` (pt), `estelle` (fr).
+
+### `export-voice` command
+
+Encode an audio file and save the resulting flow-LM state to a
+`.safetensors` file in upstream Python's `export_model_state` layout.
+Compatible round-trip with both Rust and Python implementations.
+
+```
+pocket-tts export-voice [OPTIONS] <AUDIO_PATH> <EXPORT_PATH>
+
+Options:
+      --language <LANG>          Language model [default: english]
+      --variant <VARIANT>        Legacy: directly select a YAML stem.
+  -q, --quiet                    Suppress output
+```
 
 ### `serve` command
 
@@ -191,8 +246,9 @@ pocket-tts serve [OPTIONS]
 Options:
       --host <HOST>              Bind address [default: 127.0.0.1]
   -p, --port <PORT>              Port number [default: 8000]
-      --voice <VOICE>            Default voice [default: alba]
-      --variant <VARIANT>        Model variant [default: b6369a24]
+      --voice <VOICE>            Default voice (empty -> language default)
+      --language <LANG>          Language model [default: english]
+      --variant <VARIANT>        Legacy: directly select a YAML stem.
       --temperature <FLOAT>      Temperature [default: 0.7]
       --lsd-decode-steps <INT>   LSD steps [default: 1]
       --eos-threshold <FLOAT>    EOS threshold [default: -4.0]

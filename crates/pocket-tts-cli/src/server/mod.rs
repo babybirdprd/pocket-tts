@@ -6,7 +6,7 @@ use anyhow::Result;
 use pocket_tts::TTSModel;
 
 use crate::commands::serve::{ServeArgs, UiMode, print_endpoints};
-use crate::voice::{resolve_voice, voice_cache_key};
+use crate::voice::{resolve_voice_for_language, voice_cache_key};
 
 pub mod handlers;
 pub mod routes;
@@ -48,12 +48,17 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
         println!("  Set MKL_NUM_THREADS={mkl_threads}");
     }
 
+    let (model_stem, language_opt) = args.resolved_stem();
+    let language_owned: Option<String> = language_opt.map(str::to_string);
+    let language_ref: Option<&str> = language_owned.as_deref();
+    let default_voice = args.resolved_default_voice();
+
     // Load model with configured parameters
     let model = if args.quantized {
         #[cfg(feature = "quantized")]
         {
             TTSModel::load_quantized_with_params(
-                &args.variant,
+                &model_stem,
                 args.temperature,
                 args.lsd_decode_steps,
                 args.eos_threshold,
@@ -65,7 +70,7 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
         }
     } else {
         TTSModel::load_with_params(
-            &args.variant,
+            &model_stem,
             args.temperature,
             args.lsd_decode_steps,
             args.eos_threshold,
@@ -75,8 +80,8 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
     println!("  ✓ Model loaded (sample rate: {}Hz)", model.sample_rate);
 
     // Pre-load default voice
-    println!("  Loading default voice: {}...", args.voice);
-    let default_voice_state = resolve_voice(&model, Some(&args.voice))?;
+    println!("  Loading default voice: {}...", default_voice);
+    let default_voice_state = resolve_voice_for_language(&model, Some(&default_voice), language_ref)?;
     println!("  ✓ Default voice ready");
 
     let state = state::AppState::new(
@@ -85,6 +90,7 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
         args.voice_cache_capacity,
         args.ui,
         wasm_pkg_dir,
+        language_owned.clone(),
     );
     {
         let mut cache = state
@@ -92,7 +98,7 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
             .lock()
             .map_err(|_| anyhow::anyhow!("voice cache lock poisoned"))?;
         cache.put(
-            voice_cache_key(&args.voice),
+            voice_cache_key(&default_voice),
             state.default_voice_state.clone(),
         );
     }
@@ -116,7 +122,7 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
         }
 
         println!("  Prewarming voice: {voice}...");
-        match resolve_voice(&state.model, Some(voice)) {
+        match resolve_voice_for_language(&state.model, Some(voice), language_ref) {
             Ok(vs) => {
                 let mut cache = state
                     .voice_cache

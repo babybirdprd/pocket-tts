@@ -37,6 +37,7 @@ fn create_test_state() -> Option<AppState> {
         64,
         UiMode::Standard,
         wasm_pkg_dir,
+        None,
     ))
 }
 
