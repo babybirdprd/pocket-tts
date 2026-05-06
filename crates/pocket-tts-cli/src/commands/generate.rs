@@ -171,10 +171,15 @@ pub fn run(args: GenerateArgs) -> Result<()> {
         model.sample_rate
     );
 
-    // Resolve text: use user-provided, else fall back to localized greeting.
+    // Resolve text: use user-provided, else read stdin if piped, else fall
+    // back to localized greeting. Mirrors Python upstream's behavior of
+    // accepting text via either `--text` or piped stdin.
     let text: String = match &args.text {
         Some(t) => t.clone(),
-        None => language_defaults::default_text(voice_language).to_string(),
+        None => match read_stdin_if_piped() {
+            Some(t) => t,
+            None => language_defaults::default_text(voice_language).to_string(),
+        },
     };
 
     // Resolve voice
@@ -342,4 +347,25 @@ fn truncate_text(text: &str, max_len: usize) -> String {
 /// Print available voices (for help text)
 pub fn available_voices_help() -> String {
     format!("Predefined voices: {}", PREDEFINED_VOICES.join(", "))
+}
+
+/// Read text from stdin when stdin is not a TTY (i.e., piped). Returns the
+/// trimmed contents on success, or `None` when stdin is a terminal or the
+/// pipe is empty / unreadable.
+fn read_stdin_if_piped() -> Option<String> {
+    use std::io::{IsTerminal, Read};
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    if stdin.read_to_string(&mut buf).is_err() {
+        return None;
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }

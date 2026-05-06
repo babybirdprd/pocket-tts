@@ -256,6 +256,100 @@ pub fn import_model_state_from_tensors(
     Ok(result)
 }
 
+/// Export a `ModelState` to a safetensors file using the upstream Python
+/// `export_model_state` layout (keys of the form `{module_name}/{tensor_key}`).
+///
+/// `module_prefix` is stripped from each module name with a `.` separator,
+/// inverse of [`import_model_state_from_file`]'s prepending. Pass `"flow_lm"`
+/// to produce files compatible with the predefined-voice format upstream
+/// uses for `kyutai/pocket-tts-without-voice-cloning/.../embeddings/*.safetensors`.
+///
+/// Tensor key remappings:
+/// - Rust's split `k_buf` / `v_buf` `(B, H, T, D)` are stacked back into a
+///   single `cache` tensor `[2, B, T, H, D]` with the appropriate transpose,
+///   so import/export round-trips bit-exactly.
+/// - `pos`, `l`, `head` cursor tensors are dropped (they are derived from
+///   `cache.shape[2]` and `offset` on import). This keeps the export format
+///   identical to upstream's.
+/// - All other tensors (e.g. `offset`) pass through unchanged.
+pub fn export_model_state_to_file<P: AsRef<Path>>(
+    state: &ModelState,
+    path: P,
+    module_prefix: &str,
+) -> anyhow::Result<()> {
+    let to_store = build_export_tensors(state, module_prefix)?;
+    safetensors_save_to_path(&to_store, path.as_ref())?;
+    Ok(())
+}
+
+fn build_export_tensors(
+    state: &ModelState,
+    module_prefix: &str,
+) -> anyhow::Result<HashMap<String, Tensor>> {
+    let prefix_dot = if module_prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}.", module_prefix)
+    };
+    let mut to_store: HashMap<String, Tensor> = HashMap::new();
+
+    for (full_module_name, module_state) in state.iter() {
+        // Strip the prefix so on-disk module names are FlowLM-relative.
+        let module_name = match full_module_name.strip_prefix(&prefix_dot) {
+            Some(rest) => rest.to_string(),
+            None if !prefix_dot.is_empty() => continue, // skip modules outside the prefix
+            None => full_module_name.clone(),
+        };
+
+        // Recombine k_buf + v_buf into a single `cache` tensor when both are present.
+        match (
+            module_state.get(ATTN_K_BUF_KEY),
+            module_state.get(ATTN_V_BUF_KEY),
+        ) {
+            (Some(k_buf), Some(v_buf)) => {
+                // Rust:  (B, H, T, D)  ->  (B, T, H, D)
+                let k_btshd = k_buf.transpose(1, 2)?.contiguous()?;
+                let v_btshd = v_buf.transpose(1, 2)?.contiguous()?;
+                // stack along new axis 0 -> [2, B, T, H, D]
+                let cache = Tensor::stack(&[&k_btshd, &v_btshd], 0)?;
+                to_store.insert(format!("{}/cache", module_name), cache);
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                anyhow::bail!(
+                    "module '{}' has only one of k_buf/v_buf; refusing to export inconsistent state",
+                    full_module_name
+                );
+            }
+            (None, None) => {}
+        }
+
+        // Pass through other tensors except the cursor scratch keys (which
+        // are reconstructible from cache.shape[2] / offset on import).
+        for (k, v) in module_state.iter() {
+            if matches!(
+                k.as_str(),
+                ATTN_K_BUF_KEY | ATTN_V_BUF_KEY | ATTN_POS_KEY | ATTN_LEN_KEY | ATTN_HEAD_KEY
+            ) {
+                continue;
+            }
+            to_store.insert(format!("{}/{}", module_name, k), v.clone());
+        }
+    }
+
+    Ok(to_store)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn safetensors_save_to_path(map: &HashMap<String, Tensor>, path: &Path) -> anyhow::Result<()> {
+    candle_core::safetensors::save(map, path)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn safetensors_save_to_path(_map: &HashMap<String, Tensor>, _path: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("safetensors save not supported on wasm32 target")
+}
+
 fn read_offset_scalar(t: &Tensor) -> anyhow::Result<usize> {
     if let Ok(v) = t.to_scalar::<i64>() {
         return Ok(v.max(0) as usize);
@@ -302,5 +396,86 @@ mod tests {
         assert_eq!(get_offset(&state, "test"), 42);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_export_import_roundtrip() -> anyhow::Result<()> {
+        // Build a minimal state matching the upstream voice file shape:
+        //   transformer.layers.0.self_attn -> { k_buf, v_buf, offset, cursor }
+        //   transformer.layers.1.self_attn -> { k_buf, v_buf, offset, cursor }
+        let device = candle_core::Device::Cpu;
+        let mut state = init_states(1, 16);
+
+        for layer_idx in 0..2 {
+            let k_data: Vec<f32> = (0..(1 * 16 * 8 * 64)).map(|x| x as f32 * 0.001).collect();
+            let v_data: Vec<f32> = (0..(1 * 16 * 8 * 64)).map(|x| -(x as f32) * 0.001).collect();
+            let k_buf = Tensor::from_vec(k_data, (1, 16, 8, 64), &device)?;
+            let v_buf = Tensor::from_vec(v_data, (1, 16, 8, 64), &device)?;
+            let module_name =
+                format!("flow_lm.transformer.layers.{}.self_attn", layer_idx);
+            let m = state.entry(module_name).or_default();
+            m.insert(ATTN_K_BUF_KEY.to_string(), k_buf);
+            m.insert(ATTN_V_BUF_KEY.to_string(), v_buf);
+            m.insert("offset".to_string(), Tensor::new(8_i64, &device)?);
+            write_attention_cursor(
+                m,
+                AttentionCursor {
+                    pos: 8,
+                    len: 8,
+                    head: 0,
+                },
+                &device,
+            )?;
+        }
+
+        let tmp = tempfile_path("pocket_tts_voice_state_roundtrip.safetensors");
+        export_model_state_to_file(&state, &tmp, "flow_lm")?;
+
+        let imported = import_model_state_from_file(&tmp, &device, "flow_lm")?;
+
+        // Cleanup
+        let _ = std::fs::remove_file(&tmp);
+
+        // Confirm both layers came back with k_buf, v_buf, offset, cursor.
+        for layer_idx in 0..2 {
+            let module_name =
+                format!("flow_lm.transformer.layers.{}.self_attn", layer_idx);
+            let imported_module = imported
+                .get(&module_name)
+                .unwrap_or_else(|| panic!("missing module {} after import", module_name));
+            assert!(
+                imported_module.contains_key(ATTN_K_BUF_KEY),
+                "missing k_buf"
+            );
+            assert!(
+                imported_module.contains_key(ATTN_V_BUF_KEY),
+                "missing v_buf"
+            );
+            assert!(imported_module.contains_key("offset"), "missing offset");
+            assert!(imported_module.contains_key(ATTN_POS_KEY), "missing pos");
+
+            // Dimensions must match Rust's layout.
+            let k = imported_module.get(ATTN_K_BUF_KEY).unwrap();
+            assert_eq!(k.dims(), &[1, 16, 8, 64]);
+            let v = imported_module.get(ATTN_V_BUF_KEY).unwrap();
+            assert_eq!(v.dims(), &[1, 16, 8, 64]);
+
+            // Numerical equality with the originals.
+            let orig_k = state
+                .get(&module_name)
+                .unwrap()
+                .get(ATTN_K_BUF_KEY)
+                .unwrap();
+            let max_diff = (k - orig_k)?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            assert!(max_diff < 1e-6, "k_buf round-trip diff too large: {}", max_diff);
+        }
+        Ok(())
+    }
+
+    fn tempfile_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("pid{}-{}", std::process::id(), name))
     }
 }
