@@ -499,28 +499,70 @@ impl TTSModel {
         self.get_voice_state_from_tensor(&audio)
     }
 
-    /// Create voice state from a pre-calculated latent prompt file (.safetensors)
+    /// Create voice state from a pre-calculated latent prompt file (.safetensors).
+    ///
+    /// Supports two safetensors formats:
+    ///
+    /// 1. **Rust-port format** (legacy): a single tensor named `audio_prompt`
+    ///    of shape `[B, T, dim]` already projected into flow LM space. This
+    ///    path runs `run_flow_lm_prompt` to populate KV-cache state at load time.
+    ///
+    /// 2. **Upstream Python `export_model_state` format** (current HF voices):
+    ///    keys of the form `{module_name}/{tensor_key}` with a per-layer
+    ///    `cache` tensor of shape `[2, B, T, H, D]` and an `offset` int64
+    ///    tensor. State is imported directly without re-running the transformer.
+    ///    Used by predefined voices at
+    ///    `kyutai/pocket-tts-without-voice-cloning/languages/{lang}/embeddings/`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn get_voice_state_from_prompt_file<P: AsRef<std::path::Path>>(
         &self,
         path: P,
     ) -> Result<ModelState> {
         let tensors = candle_core::safetensors::load(path, &self.device)?;
-        let prompt = tensors
-            .get("audio_prompt")
-            .ok_or_else(|| anyhow::anyhow!("'audio_prompt' not found in safetensors file"))?;
-
-        self.get_voice_state_from_prompt_tensor(prompt)
+        self.voice_state_from_loaded_tensors(tensors)
     }
 
     /// Create voice state from pre-calculated latent prompt bytes (.safetensors)
     pub fn get_voice_state_from_prompt_bytes(&self, bytes: &[u8]) -> Result<ModelState> {
         let tensors = candle_core::safetensors::load_buffer(bytes, &self.device)?;
-        let prompt = tensors
-            .get("audio_prompt")
-            .ok_or_else(|| anyhow::anyhow!("'audio_prompt' not found in safetensors bytes"))?;
+        self.voice_state_from_loaded_tensors(tensors)
+    }
 
-        self.get_voice_state_from_prompt_tensor(prompt)
+    /// Common path for both `get_voice_state_from_prompt_file` and `_bytes`.
+    /// Detects format and dispatches accordingly.
+    fn voice_state_from_loaded_tensors(
+        &self,
+        tensors: std::collections::HashMap<String, candle_core::Tensor>,
+    ) -> Result<ModelState> {
+        if let Some(prompt) = tensors.get("audio_prompt") {
+            // Legacy Rust-port format
+            return self.get_voice_state_from_prompt_tensor(prompt);
+        }
+
+        // Detect upstream `export_model_state` format: keys contain '/'.
+        let is_upstream_state = tensors.keys().any(|k| k.contains('/'));
+        if is_upstream_state {
+            // Upstream rooted state at FlowLM; Rust uses fully-qualified
+            // module names, so prepend "flow_lm".
+            let state = crate::voice_state::import_model_state_from_tensors(
+                tensors,
+                &self.device,
+                "flow_lm",
+            )?;
+            return Ok(state);
+        }
+
+        let key_sample = tensors
+            .keys()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(anyhow::anyhow!(
+            "voice safetensors did not contain an 'audio_prompt' tensor or a \
+             'module_name/tensor_key' state-dict; got keys: {}",
+            key_sample
+        ))
     }
 
     /// Create voice state from a pre-calculated latent prompt tensor

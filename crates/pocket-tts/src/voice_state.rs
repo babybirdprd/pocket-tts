@@ -1,7 +1,8 @@
 //! Voice state management for streaming generation and voice cloning
 
-use candle_core::{Result, Tensor};
+use candle_core::{Device, IndexOp, Result, Tensor};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Model state type for stateful modules
 pub type ModelState = HashMap<String, HashMap<String, Tensor>>;
@@ -129,6 +130,146 @@ pub fn set_offset(state: &mut ModelState, module_name: &str, offset: usize) -> R
         .unwrap_or(candle_core::Device::Cpu);
     module_state.insert("offset".to_string(), Tensor::new(offset as i64, &device)?);
     Ok(())
+}
+
+/// Import a pre-exported model state from a safetensors file.
+///
+/// Mirrors Python's `_import_model_state` in `pocket_tts/models/tts_model.py`,
+/// which reads files produced by `export_model_state`. Each safetensors key is
+/// of the form `module_name/tensor_key` (note the slash). The HF predefined
+/// voice embeddings under
+/// `kyutai/pocket-tts-without-voice-cloning/languages/{lang}/embeddings/{name}.safetensors`
+/// use this format.
+///
+/// `module_prefix` is prepended to each module name with a `.` separator. This
+/// is needed because the upstream export rooted state dicts at the FlowLM
+/// (e.g. `transformer.layers.0.self_attn`), while Rust's `ModelState` uses
+/// fully-qualified names (e.g. `flow_lm.transformer.layers.0.self_attn`).
+///
+/// Tensor key remappings (matching upstream behavior plus Rust's KV-cache
+/// representation):
+/// - `cache` (shape `[2, B, T, H, D]`) is split along axis 0 into `k_buf` and
+///   `v_buf` with axis-1/2 transpose to Rust's `(B, H, T, D)` layout.
+/// - `offset` is stored as-is and also seeds the attention cursor
+///   (`pos = len = offset_value`, `head = 0`) for unwindowed transformers.
+/// - `current_end` (legacy upstream key) is converted to `offset` using
+///   `tensor.shape[0]` as the value, mirroring upstream's compatibility shim.
+/// - All other keys pass through unchanged.
+pub fn import_model_state_from_file<P: AsRef<Path>>(
+    path: P,
+    device: &Device,
+    module_prefix: &str,
+) -> anyhow::Result<ModelState> {
+    let tensors = candle_core::safetensors::load(path, device)?;
+    import_model_state_from_tensors(tensors, device, module_prefix)
+}
+
+/// Variant of [`import_model_state_from_file`] that accepts an already-loaded
+/// tensor map (e.g. from `safetensors::load_buffer`).
+pub fn import_model_state_from_tensors(
+    tensors: HashMap<String, Tensor>,
+    device: &Device,
+    module_prefix: &str,
+) -> anyhow::Result<ModelState> {
+    let mut result: ModelState = HashMap::new();
+
+    for (key, tensor) in tensors {
+        let (module_name, tensor_key) = key.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("expected '<module>/<key>' in safetensors key, got '{}'", key)
+        })?;
+
+        let full_module_name = if module_prefix.is_empty() {
+            module_name.to_string()
+        } else {
+            format!("{}.{}", module_prefix, module_name)
+        };
+
+        let module_state = result.entry(full_module_name).or_default();
+
+        match tensor_key {
+            "cache" => {
+                // Upstream packs K and V along axis 0: shape `[2, B, T, H, D]`.
+                // Rust's attention buffers are `(B, H, T, D)` separately.
+                let dims = tensor.dims();
+                if dims.len() != 5 || dims[0] != 2 {
+                    anyhow::bail!(
+                        "expected cache shape [2, B, T, H, D], got {:?} for key {}",
+                        dims,
+                        key
+                    );
+                }
+                let k = tensor.i(0)?.transpose(1, 2)?.contiguous()?; // (B, H, T, D)
+                let v = tensor.i(1)?.transpose(1, 2)?.contiguous()?;
+                module_state.insert(ATTN_K_BUF_KEY.to_string(), k);
+                module_state.insert(ATTN_V_BUF_KEY.to_string(), v);
+                // The cache's time dimension is the prompt length; record it.
+                let prompt_len = dims[2];
+                let cursor = AttentionCursor {
+                    pos: prompt_len,
+                    len: prompt_len,
+                    head: 0,
+                };
+                write_attention_cursor(module_state, cursor, device)?;
+            }
+            "offset" => {
+                // The upstream-exported `offset` is an int64 scalar (or
+                // shape `[1]`). Use it as the canonical step counter.
+                let off_val = read_offset_scalar(&tensor)?;
+                module_state.insert("offset".to_string(), Tensor::new(off_val as i64, device)?);
+                // If no cache key was seen yet, also seed the cursor so a
+                // module that ships only `offset` (no cache tensor) still has
+                // position info.
+                if !module_state.contains_key(ATTN_POS_KEY) {
+                    write_attention_cursor(
+                        module_state,
+                        AttentionCursor {
+                            pos: off_val,
+                            len: off_val,
+                            head: 0,
+                        },
+                        device,
+                    )?;
+                }
+            }
+            "current_end" => {
+                // Legacy upstream key: shape[0] is the step count.
+                let len = tensor.dim(0).unwrap_or(0);
+                module_state.insert("offset".to_string(), Tensor::new(len as i64, device)?);
+                if !module_state.contains_key(ATTN_POS_KEY) {
+                    write_attention_cursor(
+                        module_state,
+                        AttentionCursor {
+                            pos: len,
+                            len,
+                            head: 0,
+                        },
+                        device,
+                    )?;
+                }
+            }
+            _ => {
+                module_state.insert(tensor_key.to_string(), tensor);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn read_offset_scalar(t: &Tensor) -> anyhow::Result<usize> {
+    if let Ok(v) = t.to_scalar::<i64>() {
+        return Ok(v.max(0) as usize);
+    }
+    if let Ok(v) = t.to_scalar::<u32>() {
+        return Ok(v as usize);
+    }
+    // Tensor of shape [1], int64.
+    if let Ok(vec) = t.flatten_all().and_then(|x| x.to_vec1::<i64>()) {
+        if let Some(&first) = vec.first() {
+            return Ok(first.max(0) as usize);
+        }
+    }
+    anyhow::bail!("unsupported offset tensor dtype/shape: {:?}", t.dims())
 }
 
 #[cfg(test)]
