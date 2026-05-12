@@ -41,6 +41,7 @@ pub async fn run(args: WasmDemoArgs) -> Result<()> {
         lsd_decode_steps: 1,
         eos_threshold: -4.0,
         quantized: false,
+        use_metal: false,
         voice_cache_capacity: 64,
         prewarm_voices: "alba".to_string(),
         warmup: true,

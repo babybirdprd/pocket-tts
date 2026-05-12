@@ -48,15 +48,31 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
         println!("  Set MKL_NUM_THREADS={mkl_threads}");
     }
 
+    let device = if args.use_metal {
+        #[cfg(feature = "metal")]
+        {
+            candle_core::Device::new_metal(0)?
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            anyhow::bail!("Metal feature not enabled. Rebuild with --features metal");
+        }
+    } else {
+        candle_core::Device::Cpu
+    };
+    println!("  Using device: {:?}", device);
+
     // Load model with configured parameters
     let model = if args.quantized {
         #[cfg(feature = "quantized")]
         {
-            TTSModel::load_quantized_with_params(
+            TTSModel::load_quantized_with_params_device(
                 &args.variant,
                 args.temperature,
                 args.lsd_decode_steps,
                 args.eos_threshold,
+                None,
+                &device,
             )?
         }
         #[cfg(not(feature = "quantized"))]
@@ -64,11 +80,13 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
             anyhow::bail!("Quantization feature not enabled. Rebuild with --features quantized");
         }
     } else {
-        TTSModel::load_with_params(
+        TTSModel::load_with_params_device(
             &args.variant,
             args.temperature,
             args.lsd_decode_steps,
             args.eos_threshold,
+            None,
+            &device,
         )?
     };
 

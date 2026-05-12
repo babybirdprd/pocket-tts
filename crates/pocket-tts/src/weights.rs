@@ -41,6 +41,7 @@ pub fn download_if_necessary(file_path: &str) -> Result<PathBuf> {
         let token = std::env::var("HF_TOKEN").ok();
 
         let api = ApiBuilder::new().with_token(token).build()?;
+        let repo_display = repo_id.clone();
 
         // Create repo with or without revision
         let repo = if let Some(rev) = revision {
@@ -50,7 +51,16 @@ pub fn download_if_necessary(file_path: &str) -> Result<PathBuf> {
         };
 
         let api_repo = api.repo(repo);
-        let path = api_repo.get(&filename)?;
+        let path = api_repo.get(&filename).map_err(|err| {
+            let auth_hint = if std::env::var_os("HF_TOKEN").is_some() {
+                "HF_TOKEN is set, but HuggingFace rejected the request. Check that the token is valid and has access to the gated kyutai/pocket-tts model."
+            } else {
+                "HF_TOKEN is not set. Request access to kyutai/pocket-tts on HuggingFace, then run with HF_TOKEN=<your_token> in the environment."
+            };
+            anyhow::anyhow!(
+                "failed to download HuggingFace file '{filename}' from '{repo_display}': {err}. {auth_hint}"
+            )
+        })?;
         Ok(path)
     } else {
         Ok(PathBuf::from(file_path))
