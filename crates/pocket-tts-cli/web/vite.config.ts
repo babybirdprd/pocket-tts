@@ -3,6 +3,8 @@ import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
+const apiTarget = process.env.POCKET_TTS_API_BASE || "http://localhost:8000"
+
 // https://vite.dev/config/
 export default defineConfig({
   base: "./",
@@ -14,10 +16,10 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/stream': 'http://localhost:3000',
-      '/generate': 'http://localhost:3000',
-      '/health': 'http://localhost:3000',
-      '/wasm': 'http://localhost:3000',
+      '/stream': apiTarget,
+      '/generate': apiTarget,
+      '/health': apiTarget,
+      '/wasm': apiTarget,
     }
   }
 })

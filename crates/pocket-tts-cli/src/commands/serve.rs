@@ -60,6 +60,10 @@ pub struct ServeArgs {
     #[arg(long)]
     pub quantized: bool,
 
+    /// Use Metal acceleration (macOS only)
+    #[arg(long)]
+    pub use_metal: bool,
+
     /// Maximum number of resolved voice states to keep in server LRU cache.
     #[arg(long, default_value_t = 64)]
     pub voice_cache_capacity: usize,
