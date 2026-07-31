@@ -14,8 +14,14 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-mkl = ["candle-core/mkl", "candle-nn/mkl"]
+mkl = ["candle-core/mkl", "candle-nn/mkl", "dep:intel-mkl-src"]
+# Apple Accelerate BLAS for the CPU path (macOS).
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
+# Kept for compatibility: int8 quantization is now always available.
 quantized = []
+# Non-WAV audio prompts (mp3/flac/ogg/m4a), the counterpart of upstream's
+# optional soundfile dependency.
+audio-formats = ["dep:symphonia"]
 # WASM is handled by target, not feature flag - candle-core auto-detects wasm32 target
 wasm = []
 metal = ["candle-core/metal", "candle-nn/metal"]
@@ -47,10 +53,15 @@ tracing.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 hf-hub.workspace = true
 memmap2.workspace = true
+symphonia = { version = "0.5", optional = true, features = ["mp3", "isomp4", "aac"] }
 # sentencepiece removed - causes protobuf conflict with onnxruntime
 # Using tokenizers crate's built-in SentencePiece support instead
 tokenizers = { workspace = true, features = ["onig", "progressbar", "http"] }
-intel-mkl-src.workspace = true
+
+# MKL is x86-only; keeping it out of the default graph spares every other
+# platform its ocipkg/getset build chain (future-incompat noise included).
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+intel-mkl-src = { workspace = true, optional = true }
 
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

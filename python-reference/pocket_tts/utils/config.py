@@ -5,6 +5,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+CONFIGS_DIR = Path(__file__).parent.parent / "config"
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -45,6 +47,7 @@ class FlowLMConfig(StrictModel):
     # conditioning
     lookup_table: LookupTable
     weights_path: str | None = None
+    insert_bos_before_voice: bool = False
 
 
 # SEANet configuration
@@ -101,6 +104,8 @@ class MimiConfig(StrictModel):
     # Quantizer
     quantizer: QuantizerConfig
     weights_path: str | None = None
+    inner_dim: int | None = None
+    outer_dim: int | None = None
 
 
 class Config(StrictModel):
@@ -108,13 +113,22 @@ class Config(StrictModel):
     mimi: MimiConfig
     weights_path: str | None = None
     weights_path_without_voice_cloning: str | None = None
+    pad_with_spaces_for_short_inputs: bool = False
+    remove_semicolons: bool = False
+    model_recommended_frames_after_eos: int | None = None
+    default_temperature: float = 0.7
 
 
 def load_config(yaml_path: str | Path) -> Config:
     yaml_path = Path(yaml_path)
 
     if not yaml_path.exists():
-        raise FileNotFoundError(f"Config file not found: {yaml_path}")
+        if yaml_path.is_relative_to(CONFIGS_DIR):
+            raise FileNotFoundError(
+                f"Config file not found: {yaml_path}. "
+                f"Did you make a typo? Available languages: {[p.stem for p in CONFIGS_DIR.glob('*.yaml')]}"
+            )
+        raise FileNotFoundError(f"Config file not found: {yaml_path}. Did you make a typo?")
 
     with open(yaml_path, "r") as f:
         config_dict = yaml.safe_load(f)

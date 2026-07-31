@@ -74,9 +74,34 @@ impl LUTConditioner {
         // Build tokenizer with SentencePiece-style settings
         let mut tokenizer = Tokenizer::new(unigram);
         tokenizer.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, false)));
-        tokenizer.with_decoder(Some(Metaspace::new('▁', PrependScheme::Always, false)));
+        tokenizer.with_decoder(Some(Self::sentencepiece_decoder()?));
 
         Ok(tokenizer)
+    }
+
+    /// The sentencepiece-compatible decoder chain. A Metaspace decoder alone
+    /// leaves byte-fallback tokens as literal "<0x21>" text — French
+    /// typography (space before "!", ":", "?") triggers those, and the
+    /// splitter's decode/re-encode round trip would then make the model
+    /// spell the byte token out loud. Replace + ByteFallback + Fuse + Strip
+    /// is what real sentencepiece decoding does.
+    fn sentencepiece_decoder() -> Result<tokenizers::decoders::sequence::Sequence> {
+        use tokenizers::DecoderWrapper;
+        use tokenizers::decoders::byte_fallback::ByteFallback;
+        use tokenizers::decoders::fuse::Fuse;
+        use tokenizers::decoders::sequence::Sequence;
+        use tokenizers::decoders::strip::Strip;
+        use tokenizers::normalizers::replace::Replace;
+
+        Ok(Sequence::new(vec![
+            DecoderWrapper::Replace(
+                Replace::new("▁", " ")
+                    .map_err(|e| anyhow::anyhow!("Failed to build Replace decoder: {:?}", e))?,
+            ),
+            DecoderWrapper::ByteFallback(ByteFallback::new()),
+            DecoderWrapper::Fuse(Fuse::new()),
+            DecoderWrapper::Strip(Strip::new(' ', 1, 0)),
+        ]))
     }
 
     /// Parse SentencePiece model protobuf to extract vocabulary
@@ -263,7 +288,7 @@ impl LUTConditioner {
 
             let mut tok = Tokenizer::new(unigram);
             tok.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, false)));
-            tok.with_decoder(Some(Metaspace::new('▁', PrependScheme::Always, false)));
+            tok.with_decoder(Some(Self::sentencepiece_decoder()?));
             tok
         };
 
@@ -310,6 +335,22 @@ impl LUTConditioner {
             .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Failed to encode text: {:?}", e))?;
         Ok(encoding.get_ids().len())
+    }
+
+    /// Encode a text to raw token ids (used by the token-boundary splitter).
+    pub fn encode_ids(&self, text: &str) -> Result<Vec<u32>> {
+        let encoding = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| anyhow::anyhow!("Failed to encode text: {:?}", e))?;
+        Ok(encoding.get_ids().to_vec())
+    }
+
+    /// Decode token ids back to text (used by the token-boundary splitter).
+    pub fn decode_ids(&self, ids: &[u32]) -> Result<String> {
+        self.tokenizer
+            .decode(ids, true)
+            .map_err(|e| anyhow::anyhow!("Failed to decode tokens: {:?}", e))
     }
 }
 

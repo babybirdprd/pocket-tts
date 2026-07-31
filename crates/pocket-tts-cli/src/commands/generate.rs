@@ -9,20 +9,111 @@ use owo_colors::OwoColorize;
 use pocket_tts::TTSModel;
 use std::path::PathBuf;
 
-use crate::voice::{PREDEFINED_VOICES, resolve_voice};
+use crate::voice::{PREDEFINED_VOICES, default_voice_for, resolve_voice};
 
 /// Default text shown when user runs without --text
 pub const DEFAULT_TEXT: &str =
     "Hello world! I am Pocket TTS, running blazingly fast in Rust. I hope you'll like me.";
 
+/// Per-language demo texts, matching Python's DEFAULT_TEXT_FOR_LANGUAGE
+/// (matched as a substring of the variant name).
+const DEFAULT_TEXT_FOR_LANGUAGE: &[(&str, &str)] = &[
+    (
+        "french",
+        "Bonjour le monde. Je suis le TTS de poche de Kyutai. \
+         Je suis assez rapide pour fonctionner sur de petits CPU. \
+         J'espère que vous m'aimerez.",
+    ),
+    (
+        "german",
+        "Hallo Welt. Ich bin Pocket TTS von Kyutai. \
+         Ich bin schnell genug, um auch auf kleinen CPUs zu laufen. \
+         Ich hoffe, ich gefalle dir.",
+    ),
+    (
+        "italian",
+        "Ciao mondo. Sono il Pocket TTS di Kyutai. \
+         Sono abbastanza veloce da funzionare su piccole CPU. \
+         Spero che ti piacerò.",
+    ),
+    (
+        "spanish",
+        "Hola mundo. Soy el Pocket TTS de Kyutai. \
+         Soy lo suficientemente rápido para funcionar en pequeñas CPU. \
+         Espero que te guste.",
+    ),
+    (
+        "portuguese",
+        "Olá mundo. Eu sou o Pocket TTS da Kyutai. \
+         Sou rápido o suficiente para rodar em CPUs pequenas. \
+         Espero que você goste de mim.",
+    ),
+];
+
+/// Pick the demo text for a variant when the user gives no --text.
+fn default_text_for_variant(variant: &str) -> &'static str {
+    DEFAULT_TEXT_FOR_LANGUAGE
+        .iter()
+        .find(|(lang, _)| variant.contains(lang))
+        .map(|(_, text)| *text)
+        .unwrap_or(DEFAULT_TEXT)
+}
+
+/// Resolve the model spec (language name or config path) from the
+/// upstream-style --language/--config arguments; --variant stays as a
+/// back-compat alias of --language.
+pub fn resolve_model_spec(
+    language: Option<&str>,
+    config: Option<&std::path::Path>,
+    variant: Option<&str>,
+) -> Result<String> {
+    if config.is_some() && (language.is_some() || variant.is_some()) {
+        anyhow::bail!("Cannot specify both config and language, please choose one or the other.");
+    }
+    if language.is_some() && variant.is_some() {
+        anyhow::bail!("--variant is an alias of --language; pass only one of them.");
+    }
+    if let Some(path) = config {
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    let language = language.or(variant).unwrap_or(pocket_tts::config::defaults::DEFAULT_VARIANT);
+    if language == "french" {
+        anyhow::bail!(
+            "For technical reasons, only a larger 24-layer model is available for French. \
+             Please use the 'french_24l' language instead."
+        );
+    }
+    Ok(language.to_string())
+}
+
+/// Read the text argument, resolving "-" to stdin like upstream.
+pub fn resolve_text(text: Option<&str>, model_spec: &str) -> Result<String> {
+    let text = match text {
+        Some("-") => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+        Some(t) => t.to_string(),
+        None => default_text_for_variant(model_spec).to_string(),
+    };
+    if text.trim().is_empty() {
+        anyhow::bail!("No input text received.");
+    }
+    Ok(text)
+}
+
 #[derive(Parser, Debug)]
 pub struct GenerateArgs {
-    /// Text to synthesize (defaults to a greeting if not specified)
-    #[arg(short, long, default_value = DEFAULT_TEXT)]
-    pub text: String,
+    /// Text to synthesize (defaults to a greeting in the model's language);
+    /// "-" reads from stdin
+    #[arg(short, long)]
+    pub text: Option<String>,
 
     /// Voice for synthesis. Can be:
-    /// - Predefined name: alba, marius, javert, jean, fantine, cosette, eponine, azelma
+    /// - Predefined name: alba, marius, ... (estelle, giovanni, lola, juergen,
+    ///   rafael for the language models); defaults to the model's language voice
     /// - Path to .wav file for voice cloning
     /// - Path to .safetensors embeddings file
     /// - HuggingFace URL: hf://owner/repo/file.wav
@@ -33,13 +124,30 @@ pub struct GenerateArgs {
     #[arg(short, long, default_value = "output.wav")]
     pub output: PathBuf,
 
-    /// Model variant (default: b6369a24)
-    #[arg(long, default_value = "b6369a24")]
-    pub variant: String,
+    /// Language for the TTS model: english, english_2026-01, english_2026-04,
+    /// french_24l, german(_24l), italian(_24l), portuguese(_24l), spanish(_24l).
+    /// The historical "b6369a24" name (= english_2026-01) still works.
+    /// Incompatible with --config. Default: english
+    #[arg(long)]
+    pub language: Option<String>,
 
-    /// Sampling temperature (higher = more variation)
-    #[arg(long, default_value = "0.7")]
-    pub temperature: f32,
+    /// Path to a locally-saved model config .yaml file; incompatible with
+    /// --language
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    /// Back-compat alias of --language
+    #[arg(long, hide = true)]
+    pub variant: Option<String>,
+
+    /// Maximum number of tokens per generation chunk
+    #[arg(long, default_value_t = pocket_tts::config::defaults::MAX_TOKEN_PER_CHUNK)]
+    pub max_tokens: usize,
+
+    /// Sampling temperature (higher = more variation); defaults to the
+    /// model's recommended temperature from its config
+    #[arg(long)]
+    pub temperature: Option<f32>,
 
     /// LSD decode steps (more steps = better quality, slower)
     #[arg(long, default_value = "1")]
@@ -61,9 +169,10 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub stream: bool,
 
-    /// Use simulated int8 quantization for inference
-    #[arg(long)]
-    pub quantized: bool,
+    /// Apply int8 quantization to reduce memory usage (upstream --quantize;
+    /// --quantized kept as an alias)
+    #[arg(long, alias = "quantized")]
+    pub quantize: bool,
 
     /// Use Metal acceleration (macOS only)
     #[arg(long)]
@@ -112,27 +221,24 @@ pub fn run(args: GenerateArgs) -> Result<()> {
     // Load model
     info!(quiet, "{} Loading model...", "▶".cyan());
 
-    let quantized = args.quantized;
+    let model_spec = resolve_model_spec(
+        args.language.as_deref(),
+        args.config.as_deref(),
+        args.variant.as_deref(),
+    )?;
 
-    let model = if quantized {
-        #[cfg(feature = "quantized")]
-        {
-            TTSModel::load_quantized_with_params_device(
-                &args.variant,
-                args.temperature,
-                args.lsd_decode_steps,
-                args.eos_threshold,
-                args.noise_clamp,
-                &device,
-            )?
-        }
-        #[cfg(not(feature = "quantized"))]
-        {
-            anyhow::bail!("Quantization feature not enabled. Rebuild with --features quantized");
-        }
+    let model = if args.quantize {
+        TTSModel::load_quantized_with_params_device(
+            &model_spec,
+            args.temperature,
+            args.lsd_decode_steps,
+            args.eos_threshold,
+            args.noise_clamp,
+            &device,
+        )?
     } else {
         TTSModel::load_with_params_device(
-            &args.variant,
+            &model_spec,
             args.temperature,
             args.lsd_decode_steps,
             args.eos_threshold,
@@ -149,7 +255,10 @@ pub fn run(args: GenerateArgs) -> Result<()> {
     );
 
     // Resolve voice
-    let voice_display = args.voice.as_deref().unwrap_or("alba (default)");
+    let voice_display = args
+        .voice
+        .clone()
+        .unwrap_or_else(|| format!("{} (default)", default_voice_for(&model)));
     info!(
         quiet,
         "{} Using voice: {}",
@@ -161,20 +270,33 @@ pub fn run(args: GenerateArgs) -> Result<()> {
 
     info!(quiet, "  {} Voice ready", "✓".green());
 
+    let origin = model.origin.clone().unwrap_or_else(|| model_spec.clone());
+    let text = resolve_text(args.text.as_deref(), &origin)?;
+
+    let options = pocket_tts::GenerateOptions {
+        max_tokens: args.max_tokens,
+        frames_after_eos: args.frames_after_eos,
+    };
+
     // Generate
     if args.stream {
-        run_streaming(&model, &args.text, &voice_state)
+        run_streaming(&model, &text, &voice_state, options)
     } else {
-        run_to_file(&model, &args, &voice_state, quiet)
+        run_to_file(&model, &args, &text, &voice_state, options, quiet)
     }
 }
 
 /// Run streaming generation to stdout
-fn run_streaming(model: &TTSModel, text: &str, voice_state: &pocket_tts::ModelState) -> Result<()> {
+fn run_streaming(
+    model: &TTSModel,
+    text: &str,
+    voice_state: &pocket_tts::ModelState,
+    options: pocket_tts::GenerateOptions,
+) -> Result<()> {
     use std::io::Write;
     let mut stdout = std::io::stdout();
 
-    for chunk_res in model.generate_stream_long(text, voice_state) {
+    for chunk_res in model.generate_stream_long_opts(text, voice_state, options) {
         let chunk = chunk_res?;
         // Convert tensor to 16-bit PCM
         let chunk = chunk.squeeze(0)?;
@@ -190,7 +312,9 @@ fn run_streaming(model: &TTSModel, text: &str, voice_state: &pocket_tts::ModelSt
 fn run_to_file(
     model: &TTSModel,
     args: &GenerateArgs,
+    text: &str,
     voice_state: &pocket_tts::ModelState,
+    options: pocket_tts::GenerateOptions,
     quiet: bool,
 ) -> Result<()> {
     use candle_core::Tensor;
@@ -199,10 +323,10 @@ fn run_to_file(
         quiet,
         "{} Generating: \"{}\"",
         "▶".cyan(),
-        truncate_text(&args.text, 60).italic()
+        truncate_text(text, 60).italic()
     );
 
-    let total_steps = model.estimate_generation_steps(&args.text) as u64;
+    let total_steps = model.estimate_generation_steps(text) as u64;
 
     let pb = if quiet {
         ProgressBar::hidden()
@@ -223,7 +347,7 @@ fn run_to_file(
     let mut audio_chunks = Vec::new();
     let mut total_samples = 0;
 
-    for chunk_res in model.generate_stream_long(&args.text, voice_state) {
+    for chunk_res in model.generate_stream_long_opts(text, voice_state, options) {
         let chunk = chunk_res?;
         let dims = chunk.dims();
         let samples = if dims.len() == 2 { dims[1] } else { dims[0] };

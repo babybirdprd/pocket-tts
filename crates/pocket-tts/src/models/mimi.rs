@@ -63,8 +63,11 @@ impl MimiModel {
         encoder_frame_rate: f64,
         sample_rate: usize,
         channels: usize,
-        dimension: usize,        // The quantizer input dimension (32)
-        output_dimension: usize, // The decoder input dimension (512)
+        dimension: usize,         // The quantizer input dimension (32)
+        output_dimension: usize,  // The decoder input dimension (512)
+        resample_dim: usize,      // SEANet dimension: base dim of the resamplers
+        inner_dim: Option<usize>, // ConvDownsample1d output dim ("v2 of models")
+        outer_dim: Option<usize>, // ConvTrUpsample1d input dim ("v2 of models")
         name: &str,
         vb: VarBuilder,
     ) -> Result<Self> {
@@ -75,13 +78,15 @@ impl MimiModel {
             (
                 Some(ConvDownsample1d::new(
                     stride,
-                    output_dimension,
+                    resample_dim,
+                    inner_dim,
                     &format!("{}.downsample", name),
                     vb.pp("downsample"),
                 )?),
                 Some(ConvTrUpsample1d::new(
                     stride,
-                    output_dimension,
+                    resample_dim,
+                    outer_dim,
                     &format!("{}.upsample", name),
                     vb.pp("upsample"),
                 )?),
@@ -241,6 +246,9 @@ mod tests {
             1,
             128,
             512,
+            128,
+            None,
+            None,
             "mimi",
             vb.pp("mimi"),
         )?;

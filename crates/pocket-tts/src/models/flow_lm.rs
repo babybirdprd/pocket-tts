@@ -29,6 +29,9 @@ pub struct FlowLMModel {
     pub out_norm: LayerNorm,
     pub out_eos: Linear,
     pub bos_emb: Tensor,
+    /// Learnt BOS embedding prepended to the voice conditioning, present only
+    /// when the config sets `insert_bos_before_voice` (multilingual models).
+    pub bos_before_voice: Option<Tensor>,
     pub emb_mean: Tensor,
     pub emb_std: Tensor,
     pub ldim: usize,
@@ -70,12 +73,18 @@ impl FlowLMModel {
         transformer: StreamingTransformer,
         ldim: usize,
         dim: usize,
+        insert_bos_before_voice: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let input_linear = candle_nn::linear_no_bias(ldim, dim, vb.pp("input_linear"))?;
         let out_norm = LayerNorm::new(dim, 1e-5, true, vb.pp("out_norm"))?;
         let out_eos = candle_nn::linear(dim, 1, vb.pp("out_eos"))?;
         let bos_emb = vb.get(ldim, "bos_emb")?;
+        let bos_before_voice = if insert_bos_before_voice {
+            Some(vb.get((1, 1, dim), "bos_before_voice")?)
+        } else {
+            None
+        };
         let emb_mean = vb.get(ldim, "emb_mean")?;
         let emb_std = vb.get(ldim, "emb_std")?;
 
@@ -86,6 +95,7 @@ impl FlowLMModel {
             out_norm,
             out_eos,
             bos_emb,
+            bos_before_voice,
             emb_mean,
             emb_std,
             ldim,

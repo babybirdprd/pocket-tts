@@ -1,8 +1,8 @@
 [project]
 name = "pocket-tts"
 requires-python = ">= 3.10,<3.15"
-description = "Kyutai's pocket-sized TTS!"
-version = "1.0.1"
+description = "Kyutai's pocket-sized text-to-speech!"
+version = "2.1.0"
 readme = "README.md"
 dependencies = [
     "numpy>=2",
@@ -19,17 +19,26 @@ dependencies = [
     "python-multipart>=0.0.21",
     "scipy>=1.5.0",
     "einops>=0.4.0",
-    "huggingface_hub>=0.10",
+    "huggingface_hub>=0.13.0",
     "requests>=2.20.0",
 ]
+
+[project.optional-dependencies]
+audio = ["soundfile>=0.12.0"]
+quantize = ["torchao>=0.16.0"]
 
 
 [dependency-groups]
 dev = [
     "coverage>=7.6.12",
     "line-profiler>=5.0.0",
+    "mkdocs>=1.6.1",
+    "mkdocs-autolinks-plugin>=0.7.1",
+    "mkdocs-material>=9.7.1",
+    "mkdocstrings-python>=2.0.1",
     "pytest>=9.0.2",
     "pytest-xdist>=3.8.0",
+    "soundfile",
 ]
 
 

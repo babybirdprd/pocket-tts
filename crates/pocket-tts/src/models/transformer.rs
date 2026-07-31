@@ -2,6 +2,7 @@ use crate::ModelState;
 use crate::modules::attention::StreamingMultiheadAttention;
 use crate::modules::mlp::{LayerNorm, LayerScale};
 use crate::modules::rope::RotaryEmbedding;
+use crate::quantize::{MaybeQuantLinear, QuantizeGroup};
 use crate::voice_state::get_attention_cursor;
 use candle_core::{Result, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
@@ -11,8 +12,8 @@ pub struct StreamingTransformerLayer {
     self_attn: StreamingMultiheadAttention,
     norm1: LayerNorm,
     norm2: LayerNorm,
-    linear1: Linear,
-    linear2: Linear,
+    linear1: MaybeQuantLinear,
+    linear2: MaybeQuantLinear,
     layer_scale_1: Option<LayerScale>,
     layer_scale_2: Option<LayerScale>,
 }
@@ -40,8 +41,16 @@ impl StreamingTransformerLayer {
         )?;
         let norm1 = LayerNorm::new(d_model, 1e-5, true, vb.pp("norm1"))?;
         let norm2 = LayerNorm::new(d_model, 1e-5, true, vb.pp("norm2"))?;
-        let linear1 = candle_nn::linear_no_bias(d_model, dim_feedforward, vb.pp("linear1"))?;
-        let linear2 = candle_nn::linear_no_bias(dim_feedforward, d_model, vb.pp("linear2"))?;
+        let linear1 = MaybeQuantLinear::Full(candle_nn::linear_no_bias(
+            d_model,
+            dim_feedforward,
+            vb.pp("linear1"),
+        )?);
+        let linear2 = MaybeQuantLinear::Full(candle_nn::linear_no_bias(
+            dim_feedforward,
+            d_model,
+            vb.pp("linear2"),
+        )?);
 
         let (layer_scale_1, layer_scale_2) = if let Some(init) = layer_scale {
             (
@@ -88,6 +97,22 @@ impl StreamingTransformerLayer {
         }
         x_orig + update
     }
+
+    /// Quantize this layer's projections to int8 per the requested groups.
+    pub fn quantize_int8(&mut self, groups: &[QuantizeGroup]) -> anyhow::Result<()> {
+        if groups.contains(&QuantizeGroup::Attention) {
+            self.self_attn.quantize_int8()?;
+        }
+        if groups.contains(&QuantizeGroup::Ffn) {
+            self.linear1.quantize_int8()?;
+            self.linear2.quantize_int8()?;
+        }
+        Ok(())
+    }
+
+    pub fn is_quantized(&self) -> bool {
+        self.self_attn.is_quantized() || self.linear1.is_quantized()
+    }
 }
 
 #[derive(Clone)]
@@ -98,6 +123,19 @@ pub struct StreamingTransformer {
 }
 
 impl StreamingTransformer {
+    /// Upstream `apply_dynamic_int8` over this transformer's layers.
+    pub fn quantize_int8(&mut self, groups: &[QuantizeGroup]) -> anyhow::Result<()> {
+        for layer in &mut self.layers {
+            layer.quantize_int8(groups)?;
+        }
+        Ok(())
+    }
+
+    /// Whether any layer runs int8-quantized.
+    pub fn is_quantized(&self) -> bool {
+        self.layers.iter().any(|l| l.is_quantized())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         d_model: usize,

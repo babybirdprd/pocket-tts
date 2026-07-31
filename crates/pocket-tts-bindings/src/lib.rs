@@ -18,11 +18,21 @@ impl PyTTSModel {
         Ok(PyTTSModel { inner: model })
     }
 
-    /// Load the model with custom parameters
+    /// Load the model with int8 quantization (upstream `quantize=True`).
+    #[staticmethod]
+    fn load_quantized(variant: &str) -> PyResult<Self> {
+        let model = TTSModel::load_quantized(variant)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTTSModel { inner: model })
+    }
+
+    /// Load the model with custom parameters.
+    ///
+    /// `temp=None` uses the model's `default_temperature` from its config.
     #[staticmethod]
     fn load_with_params(
         variant: &str,
-        temp: f32,
+        temp: Option<f32>,
         lsd_decode_steps: usize,
         eos_threshold: f32,
     ) -> PyResult<Self> {

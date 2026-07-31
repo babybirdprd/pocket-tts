@@ -49,23 +49,21 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
     }
 
     // Load model with configured parameters
-    let model = if args.quantized {
-        #[cfg(feature = "quantized")]
-        {
-            TTSModel::load_quantized_with_params(
-                &args.variant,
-                args.temperature,
-                args.lsd_decode_steps,
-                args.eos_threshold,
-            )?
-        }
-        #[cfg(not(feature = "quantized"))]
-        {
-            anyhow::bail!("Quantization feature not enabled. Rebuild with --features quantized");
-        }
+    let model_spec = crate::commands::generate::resolve_model_spec(
+        args.language.as_deref(),
+        args.config.as_deref(),
+        args.variant.as_deref(),
+    )?;
+    let model = if args.quantize {
+        TTSModel::load_quantized_with_params(
+            &model_spec,
+            args.temperature,
+            args.lsd_decode_steps,
+            args.eos_threshold,
+        )?
     } else {
         TTSModel::load_with_params(
-            &args.variant,
+            &model_spec,
             args.temperature,
             args.lsd_decode_steps,
             args.eos_threshold,
@@ -74,9 +72,13 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
 
     println!("  ✓ Model loaded (sample rate: {}Hz)", model.sample_rate);
 
-    // Pre-load default voice
-    println!("  Loading default voice: {}...", args.voice);
-    let default_voice_state = resolve_voice(&model, Some(&args.voice))?;
+    // Pre-load default voice (per-language when none is given)
+    let default_voice = args
+        .voice
+        .clone()
+        .unwrap_or_else(|| crate::voice::default_voice_for(&model).to_string());
+    println!("  Loading default voice: {default_voice}...");
+    let default_voice_state = resolve_voice(&model, Some(&default_voice))?;
     println!("  ✓ Default voice ready");
 
     let state = state::AppState::new(
@@ -92,7 +94,7 @@ pub async fn start_server(args: ServeArgs) -> Result<()> {
             .lock()
             .map_err(|_| anyhow::anyhow!("voice cache lock poisoned"))?;
         cache.put(
-            voice_cache_key(&args.voice),
+            voice_cache_key(&default_voice),
             state.default_voice_state.clone(),
         );
     }

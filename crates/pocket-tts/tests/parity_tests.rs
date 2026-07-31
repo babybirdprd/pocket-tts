@@ -21,6 +21,13 @@ fn get_ref_wav_path() -> PathBuf {
     get_assets_root().join("ref.wav")
 }
 
+/// The gated kyutai/pocket-tts repo carries the voice-cloning weights; the
+/// without-voice-cloning checkpoint ships a zeroed Mimi encoder, so
+/// cloning-parity tests cannot run meaningfully without the gated repo.
+fn has_voice_cloning_weights(model: &TTSModel) -> bool {
+    model.has_voice_cloning
+}
+
 fn assert_tensors_approx_eq(t1: &Tensor, t2: &Tensor, tolerance: f32) {
     let diff = (t1 - t2).expect("sub failed").abs().expect("abs failed");
     let max_diff = diff
@@ -65,6 +72,13 @@ fn test_voice_conditioning_parity() {
     }
 
     let model = TTSModel::load("b6369a24").expect("Failed to load model");
+    if !has_voice_cloning_weights(&model) {
+        eprintln!(
+            "Skipping parity test: voice-cloning weights unavailable \
+             (gated kyutai/pocket-tts repo; speaker_proj_weight is the zeros fallback)"
+        );
+        return;
+    }
     // Use reference input if available to isolate speaker projection from resampler drift
     let input_ref_path = get_assets_root().join("ref_mimi_input.safetensors");
     let audio = if input_ref_path.exists() {
@@ -443,11 +457,18 @@ fn test_audio_generation_parity() {
     // Load Rust model with temperature = 0.0 for deterministic output
     let model = TTSModel::load_with_params(
         "b6369a24",
-        0.0, // temp
+        Some(0.0), // temp
         pocket_tts::config::defaults::LSD_DECODE_STEPS,
         pocket_tts::config::defaults::EOS_THRESHOLD,
     )
     .expect("Failed to load model");
+    if !has_voice_cloning_weights(&model) {
+        eprintln!(
+            "Skipping parity test: voice-cloning weights unavailable \
+             (gated kyutai/pocket-tts repo; speaker_proj_weight is the zeros fallback)"
+        );
+        return;
+    }
 
     let voice_state = model
         .get_voice_state(get_ref_wav_path())
@@ -551,7 +572,7 @@ fn test_decoder_parity() {
     // Load model
     let model = TTSModel::load_with_params(
         "b6369a24",
-        0.0,
+        Some(0.0),
         pocket_tts::config::defaults::LSD_DECODE_STEPS,
         pocket_tts::config::defaults::EOS_THRESHOLD,
     )

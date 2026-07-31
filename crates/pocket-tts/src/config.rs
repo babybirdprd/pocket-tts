@@ -38,6 +38,11 @@ pub struct FlowLMConfig {
     pub lookup_table: LookupTableConfig,
     #[serde(default)]
     pub weights_path: Option<String>,
+    /// When true, a learnt BOS embedding (`bos_before_voice`) is prepended to
+    /// the voice conditioning before it is fed to the FlowLM transformer.
+    /// Required by the multilingual checkpoints (e.g. `french_24l`).
+    #[serde(default)]
+    pub insert_bos_before_voice: bool,
 }
 
 /// SEANet encoder/decoder configuration
@@ -94,6 +99,15 @@ pub struct MimiConfig {
     pub quantizer: QuantizerConfig,
     #[serde(default)]
     pub weights_path: Option<String>,
+    /// "v2 of models": output dimension of the encoder-side `ConvDownsample1d`
+    /// (the unquantized latent dimension). `None` falls back to the SEANet
+    /// dimension, matching the pre-multilingual checkpoints.
+    #[serde(default)]
+    pub inner_dim: Option<usize>,
+    /// "v2 of models": input dimension of the decoder-side `ConvTrUpsample1d`.
+    /// `None` falls back to the SEANet dimension.
+    #[serde(default)]
+    pub outer_dim: Option<usize>,
 }
 
 /// Root configuration
@@ -105,6 +119,25 @@ pub struct Config {
     pub weights_path: Option<String>,
     #[serde(default)]
     pub weights_path_without_voice_cloning: Option<String>,
+    /// Prepend 8 spaces to very short inputs (< 5 words). The English
+    /// checkpoints rely on this; the multilingual ones do not.
+    #[serde(default)]
+    pub pad_with_spaces_for_short_inputs: bool,
+    /// Replace `;` with `,` before tokenisation (multilingual checkpoints).
+    #[serde(default)]
+    pub remove_semicolons: bool,
+    /// Model-recommended number of frames to keep generating after EOS.
+    /// Overrides the heuristic when set.
+    #[serde(default)]
+    pub model_recommended_frames_after_eos: Option<usize>,
+    /// Model-recommended sampling temperature, used when the caller does not
+    /// pass one (e.g. the English checkpoints prefer 0.3 per human evals).
+    #[serde(default = "default_temperature")]
+    pub default_temperature: f32,
+}
+
+fn default_temperature() -> f32 {
+    defaults::TEMPERATURE
 }
 
 /// Load configuration from a YAML file
@@ -120,7 +153,11 @@ pub mod defaults {
     pub const LSD_DECODE_STEPS: usize = 1;
     pub const NOISE_CLAMP: Option<f32> = None;
     pub const EOS_THRESHOLD: f32 = -4.0;
-    pub const DEFAULT_VARIANT: &str = "b6369a24";
+    /// Upstream DEFAULT_LANGUAGE. The pre-language checkpoint "b6369a24"
+    /// (= english_2026-01) stays available as a variant.
+    pub const DEFAULT_VARIANT: &str = "english";
+    // TODO(upstream): make this dynamic since english_2026-04 supports bigger chunks
+    pub const MAX_TOKEN_PER_CHUNK: usize = 50;
 }
 
 #[cfg(test)]

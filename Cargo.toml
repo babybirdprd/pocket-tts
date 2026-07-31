@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.2"
+version = "0.7.0"
 edition = "2024"
 authors = ["Pocket TTS Contributors"]
 license = "MIT OR Apache-2.0"
@@ -18,9 +18,9 @@ keywords = ["tts", "candle", "speech-synthesis", "audio"]
 categories = ["multimedia::audio", "science"]
 
 [workspace.dependencies]
-candle-core = "0.9.1"
-candle-nn = "0.9.1"
-candle-transformers = "0.9.1"
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
 safetensors = "0.5.2"
 hf-hub = "0.4.3"
 anyhow = "1.0"
