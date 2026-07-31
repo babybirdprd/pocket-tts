@@ -41,6 +41,12 @@ enum Commands {
     ///
     /// Starts the server with the experimental WASM-backed web UI.
     WasmDemo(commands::wasm_demo::WasmDemoArgs),
+
+    /// Convert and save an audio prompt to a .safetensors voice state
+    ///
+    /// The exported file loads much faster than re-encoding the audio and is
+    /// interchangeable with the Python implementation.
+    ExportVoice(commands::export_voice::ExportVoiceArgs),
 }
 
 #[tokio::main]
@@ -54,5 +60,6 @@ async fn main() -> Result<()> {
         }
         Commands::Serve(cmd_args) => commands::serve::run(cmd_args).await,
         Commands::WasmDemo(cmd_args) => commands::wasm_demo::run(cmd_args).await,
+        Commands::ExportVoice(cmd_args) => commands::export_voice::run(cmd_args),
     }
 }

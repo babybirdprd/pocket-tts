@@ -12,13 +12,67 @@ use pocket_tts::weights::download_if_necessary;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-/// Predefined stock voices from kyutai/pocket-tts-without-voice-cloning
+/// Predefined stock voices from kyutai/pocket-tts-without-voice-cloning.
+/// The first eight are English; the language models bring their own
+/// (giovanni, lola, juergen, rafael, estelle), scoped under languages/.
 pub const PREDEFINED_VOICES: &[&str] = &[
-    "alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma",
+    "alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma", "giovanni",
+    "lola", "juergen", "rafael", "estelle",
 ];
 
 /// HuggingFace repo for stock voice embeddings
 const STOCK_VOICE_REPO: &str = "kyutai/pocket-tts-without-voice-cloning";
+
+/// Pinned revision of the languages/ embeddings tree, matching Python's
+/// `get_predefined_voice`.
+const STOCK_VOICE_REVISION: &str = "e041936c75475d350b405bc870bcf7c22da4e9e6";
+
+/// Default voice per language, matching Python's DEFAULT_VOICE_FOR_LANGUAGE
+/// (matched as a substring of the model origin, e.g. "french" in
+/// "french_24l") with alba as the fallback.
+const DEFAULT_VOICE_FOR_LANGUAGE: &[(&str, &str)] = &[
+    ("italian", "giovanni"),
+    ("spanish", "lola"),
+    ("german", "juergen"),
+    ("portuguese", "rafael"),
+    ("french", "estelle"),
+];
+
+/// Fallback default voice (English stock).
+const DEFAULT_VOICE_FALLBACK: &str = "alba";
+
+/// Pick the default voice for a model from its origin (config stem).
+pub fn default_voice_for(model: &TTSModel) -> &'static str {
+    let origin = model.origin.as_deref().unwrap_or("");
+    DEFAULT_VOICE_FOR_LANGUAGE
+        .iter()
+        .find(|(lang, _)| origin.contains(lang))
+        .map(|(_, voice)| *voice)
+        .unwrap_or(DEFAULT_VOICE_FALLBACK)
+}
+
+/// Build the embeddings URL for a predefined voice name, matching Python's
+/// `get_predefined_voice`: language models look under
+/// languages/{origin}/embeddings/ at a pinned revision. The original
+/// `b6369a24` checkpoint predates the languages/ tree and keeps the
+/// root-level embeddings.
+fn stock_voice_url(model: &TTSModel, name: &str) -> String {
+    match model.origin.as_deref() {
+        Some(origin) if origin != "b6369a24" => format!(
+            "hf://{STOCK_VOICE_REPO}/languages/{origin}/embeddings/{name}.safetensors@{STOCK_VOICE_REVISION}"
+        ),
+        _ => format!("hf://{STOCK_VOICE_REPO}/embeddings/{name}.safetensors"),
+    }
+}
+
+/// A bare lowercase identifier is treated as a predefined voice name and
+/// resolved against the model's language tree, like Python does.
+fn is_bare_voice_name(spec: &str) -> bool {
+    !spec.is_empty()
+        && spec
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
 
 /// Build a stable cache key for a voice specification.
 ///
@@ -26,14 +80,16 @@ const STOCK_VOICE_REPO: &str = "kyutai/pocket-tts-without-voice-cloning";
 pub fn voice_cache_key(spec: &str) -> String {
     let spec = spec.trim();
 
-    if PREDEFINED_VOICES.contains(&spec) {
-        return format!("stock:{spec}");
-    }
+    // Mirror resolve_voice_spec's order: hf URL, then existing file, then
+    // bare predefined name, so the key never disagrees with resolution.
     if spec.starts_with("hf://") {
         return format!("hf:{spec}");
     }
 
     let path = PathBuf::from(spec);
+    if !path.exists() && is_bare_voice_name(spec) {
+        return format!("stock:{spec}");
+    }
     if path.exists() {
         let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
         let (mtime_secs, size) = std::fs::metadata(&canonical)
@@ -75,8 +131,9 @@ pub fn resolve_voice(model: &TTSModel, voice_spec: Option<&str>) -> Result<pocke
     match voice_spec {
         Some(spec) => resolve_voice_spec(model, spec),
         None => {
-            // Default to "alba" stock voice
-            resolve_predefined_voice(model, "alba")
+            // Default voice depends on the model's language (Estelle for
+            // French, alba for English, ...).
+            resolve_predefined_voice(model, default_voice_for(model))
         }
     }
 }
@@ -85,20 +142,22 @@ pub fn resolve_voice(model: &TTSModel, voice_spec: Option<&str>) -> Result<pocke
 fn resolve_voice_spec(model: &TTSModel, spec: &str) -> Result<pocket_tts::ModelState> {
     let spec = spec.trim();
 
-    // 1. Check if it's a predefined voice name
-    if PREDEFINED_VOICES.contains(&spec) {
-        return resolve_predefined_voice(model, spec);
-    }
-
-    // 2. Check if it's an hf:// URL
+    // 1. Check if it's an hf:// URL
     if spec.starts_with("hf://") {
         return resolve_hf_voice(model, spec);
     }
 
-    // 3. Check if it's a file path that exists
+    // 2. Check if it's a file path that exists
     let path = PathBuf::from(spec);
     if path.exists() {
         return resolve_file_voice(model, &path);
+    }
+
+    // 3. A bare name is a predefined voice, resolved against the model's
+    //    language tree (any name Kyutai publishes there works, not just the
+    //    ones listed in PREDEFINED_VOICES).
+    if is_bare_voice_name(spec) {
+        return resolve_predefined_voice(model, spec);
     }
 
     // 4. Check if it's base64 encoded audio
@@ -120,13 +179,14 @@ fn resolve_voice_spec(model: &TTSModel, spec: &str) -> Result<pocket_tts::ModelS
 
 /// Resolve a predefined voice name to embeddings via HF Hub
 fn resolve_predefined_voice(model: &TTSModel, name: &str) -> Result<pocket_tts::ModelState> {
-    let hf_path = format!("hf://{}/embeddings/{}.safetensors", STOCK_VOICE_REPO, name);
+    let hf_path = stock_voice_url(model, name);
 
     let local_path = download_if_necessary(&hf_path)
         .with_context(|| format!("Failed to download stock voice '{}'", name))?;
 
-    model
-        .get_voice_state_from_prompt_file(&local_path)
+    // resolve_file_voice handles both embedding formats (audio_prompt tensor
+    // and the per-layer KV cache the language voices use).
+    resolve_file_voice(model, &local_path)
         .with_context(|| format!("Failed to load voice embeddings from {:?}", local_path))
 }
 
@@ -148,20 +208,24 @@ fn resolve_file_voice(model: &TTSModel, path: &PathBuf) -> Result<pocket_tts::Mo
 
     match ext.as_str() {
         "safetensors" => {
-            // Pre-computed embeddings
+            // Two formats in the wild: an `audio_prompt` tensor (prompt
+            // file) or a per-layer KV cache (Kyutai predefined-voice
+            // embedding, e.g. the stock voices and the french_24l ones).
             model
                 .get_voice_state_from_prompt_file(path)
+                .or_else(|_| model.get_voice_state_from_kyutai_embedding(path))
                 .with_context(|| format!("Failed to load embeddings from {:?}", path))
         }
-        "wav" | "wave" => {
-            // Raw audio - encode through Mimi
+        "wav" | "wave" | "mp3" | "flac" | "ogg" | "m4a" => {
+            // Raw audio - encode through Mimi (non-WAV formats need the
+            // `audio-formats` feature; the reader says so if it is missing)
             model
                 .get_voice_state(path)
                 .with_context(|| format!("Failed to process audio from {:?}", path))
         }
         _ => {
             anyhow::bail!(
-                "Unsupported file extension '{}' for voice file. Expected .wav or .safetensors",
+                "Unsupported file extension '{}' for voice file. Expected .wav (or .mp3/.flac/.ogg/.m4a with the audio-formats feature) or .safetensors",
                 ext
             )
         }

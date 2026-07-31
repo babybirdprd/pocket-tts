@@ -1,4 +1,4 @@
-# Generate Command Documentation
+# Generate
 
 The `generate` command allows you to generate speech from text directly from the command line using Kyutai Pocket TTS.
 
@@ -17,14 +17,15 @@ This will generate a WAV file `./tts_output.wav` with the default text and voice
 ### Core Options
 
 - `--text TEXT`: Text to generate (default: "Hello world! I am Kyutai Pocket TTS. I'm fast enough to run on small CPUs. I hope you'll like me.")
-- `--voice VOICE`: Path to audio conditioning file (voice to clone) (default: "hf://kyutai/tts-voices/alba-mackenna/casual.wav"). Urls and local paths are supported.
+- `--voice VOICE`: Path to audio conditioning file (voice to clone). Defaults to a built-in voice chosen from the language: `giovanni` (it) for italian, `lola` (es) for spanish, `juergen` (de) for german, `rafael` (pt) for portuguese, `estelle` (fr) for french, `alba` (en) otherwise. Urls and local paths are supported.
 - `--output-path OUTPUT_PATH`: Output path for generated audio (default: "./tts_output.wav")
+- `--language LANGUAGE`: Language for the TTS model, one of `'english_2026-01'`, `'english_2026-04'`, `'english'`, `'french_24l'`, `'german'`, `'german_24l'`, `'portuguese'`, `'portuguese_24l'`, `'italian'`, `'italian_24l'`, `'spanish'`, `'spanish_24l'` (default: `english`, which is the same model as `'english_2026-04'`). Incompatible with `--config`. The "24l" variants are bigger models, not distilled yet and here only as preview.
 
 ### Generation Parameters
 
-- `--variant VARIANT`: Model signature (default: "b6369a24")
+- `--config CONFIG_PATH`: Path to custom config.yaml (for loading local model files). Incompatible with `--language`.
 - `--lsd-decode-steps LSD_DECODE_STEPS`: Number of generation steps (default: 1)
-- `--temperature TEMPERATURE`: Temperature for generation (default: 0.7)
+- `--temperature TEMPERATURE`: Temperature for generation (default: the model's recommended value from its config — 0.3 for the English model, 0.7 otherwise)
 - `--noise-clamp NOISE_CLAMP`: Noise clamp value (default: None)
 - `--eos-threshold EOS_THRESHOLD`: EOS threshold (default: -4.0)
 - `--frames-after-eos FRAMES_AFTER_EOS`: Number of frames to generate after EOS (default: None, auto-calculated based on the text length). Each frame is 80ms.
@@ -32,6 +33,7 @@ This will generate a WAV file `./tts_output.wav` with the default text and voice
 ### Performance Options
 
 - `--device DEVICE`: Device to use (default: "cpu", you may not get a speedup by using a gpu since it's a small model)
+- `--quantize`: Use int8 quantization for the model (default: False). This can reduce memory usage and increase speed, with minimal impact on audio quality.
 - `--quiet`, `-q`: Disable logging output
 
 ## Examples
@@ -57,6 +59,9 @@ pocket-tts generate --voice "hf://kyutai/tts-voices/jessica-jian/casual.wav"
 
 # Use local voice file
 pocket-tts generate --voice "./my_voice.wav"
+
+# Use a safetensors file (such as one created using `pocket-tts export-voice`)
+pocket-tts generate --voice "./my_voice.safetensors"
 ```
 
 ### Quality Tuning
@@ -72,9 +77,23 @@ pocket-tts generate --temperature 1.0
 pocket-tts generate --eos-threshold -3.0
 ```
 
+### Custom Model Config
+
+If you'd like to override the paths from which the models are loaded, you can provide a custom YAML configuration.
+
+Copy one of the files in `pocket_tts/config` (for example `pocket_tts/config/english.yaml`) and change `weights_path`, `weights_path_without_voice_cloning`, and `tokenizer_path` to the paths of the models you want to load.
+
+Then, use the --config option to point to your newly created config.
+
+```bash
+# Use a different config
+pocket-tts generate --config "C://pocket-tts/my_config.yaml"
+```
+
 ## Output Format
 
 The generate command always outputs WAV files in the following format:
+
 - **Sample Rate**: 24kHz
 - **Channels**: Mono
 - **Bit Depth**: 16-bit PCM

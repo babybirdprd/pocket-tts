@@ -4,8 +4,9 @@ use crate::voice_state::{
     ATTN_K_BUF_KEY, ATTN_LEN_KEY, ATTN_POS_KEY, ATTN_V_BUF_KEY, AttentionCursor,
     read_attention_cursor, write_attention_cursor,
 };
+use crate::quantize::MaybeQuantLinear;
 use candle_core::{DType, Result, Tensor};
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_nn::VarBuilder;
 use std::collections::HashMap;
 
 fn ring_chunks(buf: &Tensor, head: usize, len: usize) -> Result<Vec<Tensor>> {
@@ -35,8 +36,8 @@ pub struct StreamingMultiheadAttention {
     embed_dim: usize,
     num_heads: usize,
     rope: RotaryEmbedding,
-    in_proj: Linear,
-    out_proj: Linear,
+    in_proj: MaybeQuantLinear,
+    out_proj: MaybeQuantLinear,
     context: Option<usize>,
     name: String,
 }
@@ -56,8 +57,16 @@ impl StreamingMultiheadAttention {
         // num_kv = num_heads
         // kv_dim = (embed_dim // num_heads) * num_kv -> so embed_dim
         // out_dim += 2 * kv_dim -> so 3 * embed_dim
-        let in_proj = candle_nn::linear_no_bias(embed_dim, 3 * embed_dim, vb.pp("in_proj"))?;
-        let out_proj = candle_nn::linear_no_bias(embed_dim, embed_dim, vb.pp("out_proj"))?;
+        let in_proj = MaybeQuantLinear::Full(candle_nn::linear_no_bias(
+            embed_dim,
+            3 * embed_dim,
+            vb.pp("in_proj"),
+        )?);
+        let out_proj = MaybeQuantLinear::Full(candle_nn::linear_no_bias(
+            embed_dim,
+            embed_dim,
+            vb.pp("out_proj"),
+        )?);
 
         Ok(Self {
             embed_dim,
@@ -68,6 +77,17 @@ impl StreamingMultiheadAttention {
             context,
             name: name.to_string(),
         })
+    }
+
+    /// Quantize the Q/K/V and output projections to int8 (q8_0).
+    pub fn quantize_int8(&mut self) -> anyhow::Result<()> {
+        self.in_proj.quantize_int8()?;
+        self.out_proj.quantize_int8()
+    }
+
+    /// Whether the projections run int8-quantized.
+    pub fn is_quantized(&self) -> bool {
+        self.in_proj.is_quantized() && self.out_proj.is_quantized()
     }
 
     pub fn init_state(

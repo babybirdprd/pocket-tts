@@ -1,0 +1,153 @@
+
+services:
+  traefik:
+    image: traefik:v3.6.7
+    command:
+      # Swarm provider configuration
+      - "--providers.swarm.endpoint=unix:///var/run/docker.sock"
+      - "--providers.swarm.exposedByDefault=false"
+
+      # EntryPoints for HTTP and HTTPS
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+
+      # Redirect HTTP to HTTPS
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+
+      # Let's Encrypt configuration
+      - "--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web"
+      - "--certificatesResolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesResolvers.letsencrypt.acme.email=gabriel@kyutai.org"
+      - "--certificatesResolvers.letsencrypt.acme.httpChallenge=true"
+      - "--log.level=TRACE"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - letsencrypt:/letsencrypt
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+  backend-english:
+    image: rg.fr-par.scw.cloud/namespace-unruffled-tereshkova/pocket-tts-server:${COMMIT_SHA}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: ["serve", "--port", "80", "--host", "0.0.0.0", "--language", "english", "--quantize"]
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.server-english.rule=Host(`pocket-tts-api.kyutai.org`) && PathPrefix(`/english`)"
+        - "traefik.http.routers.server-english.middlewares=strip-api-english"
+        - "traefik.http.middlewares.strip-api-english.replacepathregex.regex=^/english/(.*)"
+        - "traefik.http.middlewares.strip-api-english.replacepathregex.replacement=/$$1"
+        - "traefik.http.routers.server-english.entrypoints=websecure"
+        - "traefik.http.routers.server-english.tls=true"
+        - "traefik.http.routers.server-english.tls.certresolver=letsencrypt"
+        - "traefik.http.services.server-english.loadbalancer.server.port=80"
+        - "traefik.http.routers.server-english.priority=100"
+
+  backend-german:
+    image: rg.fr-par.scw.cloud/namespace-unruffled-tereshkova/pocket-tts-server:${COMMIT_SHA}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: ["serve", "--port", "80", "--host", "0.0.0.0", "--language", "german", "--quantize"]
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.server-german.rule=Host(`pocket-tts-api.kyutai.org`) && PathPrefix(`/german`)"
+        - "traefik.http.routers.server-german.middlewares=strip-api-german"
+        - "traefik.http.middlewares.strip-api-german.replacepathregex.regex=^/german/(.*)"
+        - "traefik.http.middlewares.strip-api-german.replacepathregex.replacement=/$$1"
+        - "traefik.http.routers.server-german.entrypoints=websecure"
+        - "traefik.http.routers.server-german.tls=true"
+        - "traefik.http.routers.server-german.tls.certresolver=letsencrypt"
+        - "traefik.http.services.server-german.loadbalancer.server.port=80"
+        - "traefik.http.routers.server-german.priority=100"
+
+  backend-french:
+    image: rg.fr-par.scw.cloud/namespace-unruffled-tereshkova/pocket-tts-server:${COMMIT_SHA}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: ["serve", "--port", "80", "--host", "0.0.0.0", "--language", "french_24l"]
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.server-french.rule=Host(`pocket-tts-api.kyutai.org`) && PathPrefix(`/french`)"
+        - "traefik.http.routers.server-french.middlewares=strip-api-french"
+        - "traefik.http.middlewares.strip-api-french.replacepathregex.regex=^/french/(.*)"
+        - "traefik.http.middlewares.strip-api-french.replacepathregex.replacement=/$$1"
+        - "traefik.http.routers.server-french.entrypoints=websecure"
+        - "traefik.http.routers.server-french.tls=true"
+        - "traefik.http.routers.server-french.tls.certresolver=letsencrypt"
+        - "traefik.http.services.server-french.loadbalancer.server.port=80"
+        - "traefik.http.routers.server-french.priority=100"
+
+  backend-italian:
+    image: rg.fr-par.scw.cloud/namespace-unruffled-tereshkova/pocket-tts-server:${COMMIT_SHA}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: ["serve", "--port", "80", "--host", "0.0.0.0", "--language", "italian", "--quantize"]
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.server-italian.rule=Host(`pocket-tts-api.kyutai.org`) && PathPrefix(`/italian`)"
+        - "traefik.http.routers.server-italian.middlewares=strip-api-italian"
+        - "traefik.http.middlewares.strip-api-italian.replacepathregex.regex=^/italian/(.*)"
+        - "traefik.http.middlewares.strip-api-italian.replacepathregex.replacement=/$$1"
+        - "traefik.http.routers.server-italian.entrypoints=websecure"
+        - "traefik.http.routers.server-italian.tls=true"
+        - "traefik.http.routers.server-italian.tls.certresolver=letsencrypt"
+        - "traefik.http.services.server-italian.loadbalancer.server.port=80"
+        - "traefik.http.routers.server-italian.priority=100"
+
+  backend-portuguese:
+    image: rg.fr-par.scw.cloud/namespace-unruffled-tereshkova/pocket-tts-server:${COMMIT_SHA}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: ["serve", "--port", "80", "--host", "0.0.0.0", "--language", "portuguese", "--quantize"]
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.server-portuguese.rule=Host(`pocket-tts-api.kyutai.org`) && PathPrefix(`/portuguese`)"
+        - "traefik.http.routers.server-portuguese.middlewares=strip-api-portuguese"
+        - "traefik.http.middlewares.strip-api-portuguese.replacepathregex.regex=^/portuguese/(.*)"
+        - "traefik.http.middlewares.strip-api-portuguese.replacepathregex.replacement=/$$1"
+        - "traefik.http.routers.server-portuguese.entrypoints=websecure"
+        - "traefik.http.routers.server-portuguese.tls=true"
+        - "traefik.http.routers.server-portuguese.tls.certresolver=letsencrypt"
+        - "traefik.http.services.server-portuguese.loadbalancer.server.port=80"
+        - "traefik.http.routers.server-portuguese.priority=100"
+
+  backend-spanish:
+    image: rg.fr-par.scw.cloud/namespace-unruffled-tereshkova/pocket-tts-server:${COMMIT_SHA}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: ["serve", "--port", "80", "--host", "0.0.0.0", "--language", "spanish", "--quantize"]
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.server-spanish.rule=Host(`pocket-tts-api.kyutai.org`) && PathPrefix(`/spanish`)"
+        - "traefik.http.routers.server-spanish.middlewares=strip-api-spanish"
+        - "traefik.http.middlewares.strip-api-spanish.replacepathregex.regex=^/spanish/(.*)"
+        - "traefik.http.middlewares.strip-api-spanish.replacepathregex.replacement=/$$1"
+        - "traefik.http.routers.server-spanish.entrypoints=websecure"
+        - "traefik.http.routers.server-spanish.tls=true"
+        - "traefik.http.routers.server-spanish.tls.certresolver=letsencrypt"
+        - "traefik.http.services.server-spanish.loadbalancer.server.port=80"
+        - "traefik.http.routers.server-spanish.priority=100"
+
+
+volumes:
+  letsencrypt:
+  hf-cache:
+
+networks:
+  default:
+    driver: overlay
+    attachable: true
+    driver_opts:
+      encrypted: "true"

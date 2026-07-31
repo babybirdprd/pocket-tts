@@ -65,6 +65,7 @@ class FlowLMModel(nn.Module):
         stats_ema_decay: float = 0.999,
         text_padding_weight: float = 1.0,
         dtype=None,
+        insert_bos_before_voice: bool = False,
     ):
         super().__init__()
         self.conditioner = conditioner
@@ -78,6 +79,10 @@ class FlowLMModel(nn.Module):
         self.register_buffer("emb_std", torch.ones(ldim, dtype=dtype))
         self.register_buffer("emb_mean", torch.zeros(ldim, dtype=dtype))
         self.bos_emb = torch.nn.Parameter(torch.randn(ldim, dtype=dtype))
+        self.insert_bos_before_voice = insert_bos_before_voice
+        if self.insert_bos_before_voice:
+            # Add BOS value that's to be inserted before the voice condition
+            self.bos_before_voice = torch.nn.Parameter(torch.randn((1, 1, self.dim), dtype=dtype))
 
         self.input_linear = nn.Linear(self.ldim, dim, bias=False, dtype=dtype)
         self.transformer = transformer
@@ -185,7 +190,9 @@ class FlowLMModel(nn.Module):
         return result
 
     @classmethod
-    def from_pydantic_config(cls, config: FlowLMConfig, latent_dim: int) -> Self:
+    def from_pydantic_config(
+        cls, config: FlowLMConfig, latent_dim: int, insert_bos_before_voice: bool
+    ) -> Self:
         d_model = config.transformer.d_model
         flow_mlp = SimpleMLPAdaLN.from_pydantic_config(config, latent_dim, d_model)
 
@@ -205,4 +212,5 @@ class FlowLMModel(nn.Module):
             conditioner=conditioner,
             ldim=latent_dim,
             dtype=getattr(torch, config.dtype),
+            insert_bos_before_voice=insert_bos_before_voice,
         )

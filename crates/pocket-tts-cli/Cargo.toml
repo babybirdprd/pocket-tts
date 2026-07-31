@@ -19,11 +19,13 @@ path = "src/lib.rs"
 default = ["web-ui"]
 web-ui = ["rust-embed", "mime_guess", "percent-encoding", "pocket-tts/quantized"]
 quantized = ["pocket-tts/quantized"]
+audio-formats = ["pocket-tts/audio-formats"]
 metal = ["pocket-tts/metal", "candle-core/metal"]
 mkl = ["pocket-tts/mkl"]
+accelerate = ["pocket-tts/accelerate"]
 
 [dependencies]
-pocket-tts = { path = "../pocket-tts", version = "0.6.2" }
+pocket-tts = { path = "../pocket-tts", version = "0.7.0" }
 candle-core.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }

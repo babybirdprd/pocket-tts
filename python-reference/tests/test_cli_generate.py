@@ -1,14 +1,19 @@
 """Integration tests for the CLI generate command using real implementation."""
 
+import os
+
+import pytest
 from typer.testing import CliRunner
 
 from pocket_tts.data.audio import audio_read
-from pocket_tts.default_parameters import DEFAULT_VARIANT
 from pocket_tts.main import cli_app
 
 other_voice = "https://huggingface.co/kyutai/tts-voices/resolve/main/expresso/ex01-ex02_default_001_channel1_168s.wav"
 
 runner = CliRunner()
+
+IS_CI = os.environ.get("CI") == "true"
+CI_SKIP_REASON = "Voice cloning is not publicly available, skipping in the CI"
 
 
 def test_generate_basic_usage(tmp_path):
@@ -32,6 +37,7 @@ def test_generate_basic_usage(tmp_path):
     assert sample_rate == 24000  # Expected sample rate
 
 
+@pytest.mark.skipif(IS_CI, reason=CI_SKIP_REASON)
 def test_generate_with_custom_voice(tmp_path):
     """Test generate command with custom voice prompt."""
     output_file = tmp_path / "custom_voice_test.wav"
@@ -69,8 +75,8 @@ def test_generate_with_custom_parameters(tmp_path):
             "generate",
             "--text",
             "Testing custom parameters.",
-            "--variant",
-            DEFAULT_VARIANT,
+            "--language",
+            "english",
             "--temperature",
             "0.8",
             "--lsd-decode-steps",

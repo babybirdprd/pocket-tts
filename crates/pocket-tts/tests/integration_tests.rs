@@ -56,7 +56,7 @@ fn get_model_with_params() -> &'static TTSModel {
     MODEL_WITH_PARAMS.get_or_init(|| {
         TTSModel::load_with_params(
             "b6369a24",
-            0.0,
+            Some(0.0),
             pocket_tts::config::defaults::LSD_DECODE_STEPS,
             pocket_tts::config::defaults::EOS_THRESHOLD,
         )
@@ -370,24 +370,36 @@ fn test_pause_module_integration() {
 #[test]
 fn test_quantize_module_integration() {
     use candle_core::{Device, Tensor};
-    use pocket_tts::{QuantizeConfig, QuantizedTensor};
+    use candle_nn::Linear;
+    use pocket_tts::{MaybeQuantLinear, QuantizeGroup, RECOMMENDED_CONFIG};
+
+    // Upstream's recommended config quantizes attention and FFN, not flow_net.
+    assert!(RECOMMENDED_CONFIG.contains(&QuantizeGroup::Attention));
+    assert!(RECOMMENDED_CONFIG.contains(&QuantizeGroup::Ffn));
+    assert!(!RECOMMENDED_CONFIG.contains(&QuantizeGroup::FlowNet));
 
     let device = Device::Cpu;
-    let tensor = Tensor::new(&[1.0f32, 2.0, -3.0, 4.5, -2.1, 0.5, -0.5, 1.5], &device).unwrap();
+    let weight = Tensor::randn(0f32, 0.02, (32, 64), &device).unwrap();
+    let x = Tensor::randn(0f32, 1.0, (1, 3, 64), &device).unwrap();
 
-    // Test quantization
-    let quantized = QuantizedTensor::quantize(&tensor, 256).unwrap();
+    let mut proj = MaybeQuantLinear::Full(Linear::new(weight, None));
+    assert!(!proj.is_quantized());
+    let full = proj.forward(&x).unwrap();
 
-    // Verify scale is reasonable
-    let scale = quantized.scale();
-    assert!(scale > 0.0, "Scale should be positive");
+    proj.quantize_int8().unwrap();
+    assert!(proj.is_quantized());
+    let quant = proj.forward(&x).unwrap();
 
-    // Verify memory savings
-    let savings = quantized.theoretical_memory_savings();
-    assert_eq!(savings, 4.0, "int8 should give 4x memory savings");
+    // Quantizing twice is a no-op.
+    proj.quantize_int8().unwrap();
 
-    // Test config
-    let config = QuantizeConfig::default();
-    assert_eq!(config.num_levels, 256);
-    assert!(config.skip_layers.contains(&"embed".to_string()));
+    let diff = (full - quant)
+        .unwrap()
+        .abs()
+        .unwrap()
+        .max_all()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    assert!(diff < 0.05, "int8 error too large: {diff}");
 }

@@ -281,10 +281,19 @@ pub struct ConvDownsample1d {
 }
 
 impl ConvDownsample1d {
-    pub fn new(stride: usize, dimension: usize, name: &str, vb: VarBuilder) -> Result<Self> {
+    /// `out_dimension` defaults to `dimension` (pre-multilingual behaviour);
+    /// the multilingual checkpoints set it to the latent dim (e.g. 32).
+    pub fn new(
+        stride: usize,
+        dimension: usize,
+        out_dimension: Option<usize>,
+        name: &str,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let out_dimension = out_dimension.unwrap_or(dimension);
         let conv = StreamingConv1d::new(
             dimension,
-            dimension,
+            out_dimension,
             2 * stride,
             stride,
             1,
@@ -317,9 +326,19 @@ pub struct ConvTrUpsample1d {
 }
 
 impl ConvTrUpsample1d {
-    pub fn new(stride: usize, dimension: usize, name: &str, vb: VarBuilder) -> Result<Self> {
+    /// `in_dimension` defaults to `dimension` (pre-multilingual behaviour);
+    /// the multilingual checkpoints set it to `outer_dim`. The transposed
+    /// conv is depthwise (`groups = dimension`) with `dimension` outputs.
+    pub fn new(
+        stride: usize,
+        dimension: usize,
+        in_dimension: Option<usize>,
+        name: &str,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let in_dimension = in_dimension.unwrap_or(dimension);
         let convtr = StreamingConvTranspose1d::new(
-            dimension,
+            in_dimension,
             dimension,
             2 * stride,
             stride,

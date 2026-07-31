@@ -4,6 +4,17 @@ mod tests {
     use candle_core::Tensor;
     use pocket_tts::TTSModel;
 
+    /// Voice state that works without the gated voice-cloning weights:
+    /// the alba stock embedding (prompt-file format). Streaming tests only
+    /// need a valid state, not audio cloning; ref.wav cloning used to
+    /// silently condition on a zeroed encoder before has_voice_cloning.
+    fn stock_voice_state(model: &TTSModel) -> Result<pocket_tts::ModelState> {
+        let path = pocket_tts::weights::download_if_necessary(
+            "hf://kyutai/pocket-tts-without-voice-cloning/embeddings/alba.safetensors",
+        )?;
+        model.get_voice_state_from_prompt_file(&path)
+    }
+
     // Helper to compare tensors
     fn assert_tensors_close(t1: &Tensor, t2: &Tensor, tolerance: f64) -> Result<()> {
         let diff = (t1 - t2)?.abs()?;
@@ -25,22 +36,7 @@ mod tests {
         // Use deterministic settings for comparison
         model.temp = 0.0;
 
-        // Get voice state (using ref.wav as standard)
-        // Adjust path to point to project root ref.wav if running from crate dir
-        let root_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let ref_wav = root_dir.join("assets").join("ref.wav");
-
-        if !ref_wav.exists() {
-            println!("Skipping test: ref.wav not found at {:?}", ref_wav);
-            return Ok(());
-        }
-
-        let state = model.get_voice_state(&ref_wav)?;
+        let state = stock_voice_state(&model)?;
 
         let text = "Hello world, this is a test.";
 
@@ -74,19 +70,7 @@ mod tests {
         let mut model = TTSModel::load("b6369a24")?;
         model.temp = 0.0;
 
-        let root_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let ref_wav = root_dir.join("assets").join("ref.wav");
-
-        if !ref_wav.exists() {
-            return Ok(());
-        }
-
-        let state = model.get_voice_state(&ref_wav)?;
+        let state = stock_voice_state(&model)?;
 
         // Use a long enough text to ensure multiple chunks
         let text = "This is a longer sentence to ensure that we get multiple chunks from the streaming generator.";
@@ -121,19 +105,7 @@ mod tests {
         let mut model = TTSModel::load("b6369a24")?;
         model.temp = 0.0;
 
-        let root_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let ref_wav = root_dir.join("assets").join("ref.wav");
-
-        if !ref_wav.exists() {
-            return Ok(());
-        }
-
-        let state = model.get_voice_state(&ref_wav)?;
+        let state = stock_voice_state(&model)?;
 
         // Create a long text input (approx 50 sentences)
         let sentence = "This is a sentence that is repeated to simulate a long text input for the TTS model testing purposes.";

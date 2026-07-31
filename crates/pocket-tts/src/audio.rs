@@ -14,6 +14,116 @@ pub fn read_wav<P: AsRef<Path>>(path: P) -> anyhow::Result<(Tensor, u32)> {
     read_wav_internal(reader)
 }
 
+/// Read any supported audio file to a mono `[1, T]` tensor, mirroring
+/// upstream's `audio_read`: WAV always works via hound; other formats
+/// (mp3, flac, ogg, m4a) need the optional `audio-formats` feature
+/// (symphonia), the Rust counterpart of upstream's optional soundfile.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_audio<P: AsRef<Path>>(path: P) -> anyhow::Result<(Tensor, u32)> {
+    let path = path.as_ref();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext == "wav" || ext == "wave" {
+        return read_wav(path);
+    }
+
+    #[cfg(feature = "audio-formats")]
+    {
+        read_audio_symphonia(path)
+    }
+    #[cfg(not(feature = "audio-formats"))]
+    {
+        anyhow::bail!(
+            "reading .{ext} needs the `audio-formats` feature \
+             (rebuild with --features audio-formats), or provide a WAV file"
+        )
+    }
+}
+
+/// Decode a non-WAV audio file with symphonia to mono f32.
+#[cfg(all(not(target_arch = "wasm32"), feature = "audio-formats"))]
+fn read_audio_symphonia(path: &Path) -> anyhow::Result<(Tensor, u32)> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(path)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| anyhow::anyhow!("no audio track in {path:?}"))?;
+    let track_id = track.id;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())?;
+
+    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let mut channels = track
+        .codec_params
+        .channels
+        .map(|c| c.count())
+        .unwrap_or(1)
+        .max(1);
+    let mut mono: Vec<f32> = Vec::new();
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => break,
+            Err(e) => return Err(e.into()),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            // Recoverable per symphonia docs: skip the malformed packet.
+            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let spec = *decoded.spec();
+        sample_rate = spec.rate;
+        channels = spec.channels.count().max(1);
+        let buf = sample_buf.get_or_insert_with(|| {
+            SampleBuffer::<f32>::new(decoded.capacity() as u64, spec)
+        });
+        buf.copy_interleaved_ref(decoded);
+        for frame in buf.samples().chunks_exact(channels) {
+            mono.push(frame.iter().sum::<f32>() / channels as f32);
+        }
+    }
+
+    if mono.is_empty() || sample_rate == 0 {
+        anyhow::bail!("no audio decoded from {path:?}");
+    }
+    let n = mono.len();
+    let tensor = Tensor::from_vec(mono, (1, n), &candle_core::Device::Cpu)?;
+    Ok((tensor, sample_rate))
+}
+
 pub fn read_wav_from_bytes(bytes: &[u8]) -> anyhow::Result<(Tensor, u32)> {
     let reader = WavReader::new(std::io::Cursor::new(bytes))?;
     read_wav_internal(reader)
@@ -89,16 +199,16 @@ fn read_wav_internal<R: std::io::Read + std::io::Seek>(
     };
 
     let tensor = if channels > 1 {
-        // Interleaved to [channels, samples]
-        let num_total_samples = samples.len();
-        let num_samples = num_total_samples / channels;
-        let mut reshaped = vec![0.0f32; num_total_samples];
-        for c in 0..channels {
-            for i in 0..num_samples {
-                reshaped[c * num_samples + i] = samples[i * channels + c];
-            }
+        // Downmix interleaved multichannel audio to mono, like upstream's
+        // audio_read (the models are mono; a stereo prompt should not end up
+        // as two "channels" of conditioning).
+        let num_samples = samples.len() / channels;
+        let mut mono = vec![0.0f32; num_samples];
+        for (i, sample) in mono.iter_mut().enumerate() {
+            let frame = &samples[i * channels..(i + 1) * channels];
+            *sample = frame.iter().sum::<f32>() / channels as f32;
         }
-        Tensor::from_vec(reshaped, (channels, num_samples), device)?
+        Tensor::from_vec(mono, (1, num_samples), device)?
     } else {
         let n = samples.len();
         Tensor::from_vec(samples, (1, n), device)?

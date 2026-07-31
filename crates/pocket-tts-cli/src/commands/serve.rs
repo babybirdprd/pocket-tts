@@ -36,17 +36,30 @@ pub struct ServeArgs {
     #[arg(short, long, default_value_t = 8000)]
     pub port: u16,
 
-    /// Default voice for API requests (can be overridden per-request)
-    #[arg(long, default_value = "alba")]
-    pub voice: String,
+    /// Default voice for API requests (can be overridden per-request);
+    /// defaults to the model's language voice (estelle for French, alba
+    /// for English, ...)
+    #[arg(long)]
+    pub voice: Option<String>,
 
-    /// Model variant
-    #[arg(long, default_value = "b6369a24")]
-    pub variant: String,
+    /// Language for the TTS model (english, french_24l, ...); incompatible
+    /// with --config. Default: english
+    #[arg(long)]
+    pub language: Option<String>,
 
-    /// Sampling temperature
-    #[arg(long, default_value = "0.7")]
-    pub temperature: f32,
+    /// Path to a locally-saved model config .yaml file; incompatible with
+    /// --language
+    #[arg(long)]
+    pub config: Option<std::path::PathBuf>,
+
+    /// Back-compat alias of --language
+    #[arg(long, hide = true)]
+    pub variant: Option<String>,
+
+    /// Sampling temperature; defaults to the model's recommended
+    /// temperature from its config
+    #[arg(long)]
+    pub temperature: Option<f32>,
 
     /// LSD decode steps
     #[arg(long, default_value = "1")]
@@ -56,16 +69,18 @@ pub struct ServeArgs {
     #[arg(long, default_value = "-4.0")]
     pub eos_threshold: f32,
 
-    /// Use simulated int8 quantization for inference
-    #[arg(long)]
-    pub quantized: bool,
+    /// Apply int8 quantization to reduce memory usage (upstream --quantize;
+    /// --quantized kept as an alias)
+    #[arg(long, alias = "quantized")]
+    pub quantize: bool,
 
     /// Maximum number of resolved voice states to keep in server LRU cache.
     #[arg(long, default_value_t = 64)]
     pub voice_cache_capacity: usize,
 
     /// Comma-separated voices to prewarm at startup (e.g. "alba,marius").
-    #[arg(long, default_value = "alba")]
+    /// The default voice is always prewarmed; empty prewarms nothing else.
+    #[arg(long, default_value = "")]
     pub prewarm_voices: String,
 
     /// Run a tiny startup warmup generation to reduce first-request latency.
@@ -88,11 +103,12 @@ pub struct ServeArgs {
 pub async fn run(args: ServeArgs) -> Result<()> {
     print_banner();
 
-    println!(
-        "{} Loading model variant: {}",
-        "->".cyan(),
-        args.variant.yellow()
-    );
+    let model_spec = crate::commands::generate::resolve_model_spec(
+        args.language.as_deref(),
+        args.config.as_deref(),
+        args.variant.as_deref(),
+    )?;
+    println!("{} Loading model: {}", "->".cyan(), model_spec.yellow());
 
     println!("{} UI mode: {}", "->".cyan(), args.ui.as_str().yellow());
 
